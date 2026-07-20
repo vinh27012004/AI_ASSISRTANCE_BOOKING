@@ -1,0 +1,93 @@
+@import "tailwindcss";
+
+/*
+ * Bảng màu lấy NGUYÊN VĂN từ wireframe (Giao diện/booking.dc.html) — đổi số ở
+ * đây là lệch khỏi wireframe, đừng "làm đẹp" thêm.
+ */
+:root {
+  --canvas: #f0eee9; /* body wireframe */
+  --surface: #ffffff;
+  --surface-2: #f7f5f0; /* thanh tiêu đề cửa sổ .wt */
+  --line: #c9c4b8; /* đường gạch đứt giữa các hàng .sec */
+  --line-strong: #8a8a8a; /* viền .box */
+  --frame: #444444; /* viền khung cửa sổ .wf */
+  --fill: #eceae4; /* nền .box.f */
+  --sel: #333333; /* .box.b / .chip.on — trạng thái chọn màu tối */
+  --ink: #1a1a1a;
+  --ink-2: #555555;
+  --ink-3: #777777;
+
+  --accent: #2a78d6;
+  --accent-hover: #1c5aa8;
+  --accent-fg: #ffffff;
+  --accent-soft: #eaf2fc; /* .chip.ac */
+  --accent-line: #2a78d6;
+
+  --danger: #8c3a32; /* chữ trong .warn */
+  --danger-soft: #fdecea;
+  --danger-line: #dd9999;
+
+  --success: #3d8b52; /* vòng ✓ màn thành công */
+  --success-soft: #ecf6ef;
+  --success-line: #a8d4b6;
+
+  --warn: #6b5d1e; /* .note nền vàng */
+  --warn-soft: #fff8c8;
+  --warn-line: #d9c96b;
+
+  /* Riêng cho timeline (khớp .hh/.tname/.trow/vạch đỏ của wireframe) */
+  --tl-head: #f0ece2; /* nền hàng giờ 09 10 11… */
+  --tl-corner: #e8e2d5; /* ô góc + cột tên nhân viên */
+  --tl-hatch: #d8d4c8; /* sọc chéo "ngoài ca / khoá" */
+  --tl-grid: #eae7df; /* kẻ dọc mờ mỗi cột */
+  --tl-row-line: #d8d4ca; /* kẻ ngang giữa các hàng */
+  --now: #c0392b; /* vạch đứt "bây giờ" */
+}
+
+@theme inline {
+  --color-canvas: var(--canvas);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-frame: var(--frame);
+  --color-fill: var(--fill);
+  --color-sel: var(--sel);
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-ink-3: var(--ink-3);
+
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-fg: var(--accent-fg);
+  --color-accent-soft: var(--accent-soft);
+  --color-accent-line: var(--accent-line);
+
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+  --color-danger-line: var(--danger-line);
+
+  --color-success: var(--success);
+  --color-success-soft: var(--success-soft);
+  --color-success-line: var(--success-line);
+
+  --color-warn: var(--warn);
+  --color-warn-soft: var(--warn-soft);
+  --color-warn-line: var(--warn-line);
+
+  --font-sans: var(--font-itim);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  background: var(--canvas);
+  color: var(--ink);
+}
+
+/* Bàn phím: viền focus thống nhất, chỉ hiện khi điều hướng bằng phím. */
+@layer base {
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+}

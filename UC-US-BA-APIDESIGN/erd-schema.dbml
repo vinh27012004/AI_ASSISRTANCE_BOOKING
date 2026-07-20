@@ -1,0 +1,182 @@
+// Hệ thống booking massage りらくる (team tự build BE + FE, không có POS ngoài)
+// Paste toàn bộ file này vào dbdiagram.io
+
+Enum gender {
+  male
+  female
+}
+
+Enum member_type {
+  member
+  guest
+}
+
+Enum booking_status {
+  pending
+  confirmed
+  cancelled
+  completed
+  no_show
+}
+
+Enum slot_status {
+  available
+  booked
+}
+
+Table shop {
+  id int [pk, increment]
+  shop_code varchar(20) [unique, not null, note: 'Mã cửa hàng']
+  name varchar(100) [not null]
+  address varchar(255) [not null]
+  phone varchar(20) [not null]
+}
+
+Table course {
+  id int [pk, increment]
+  shop_id int [not null]
+  name varchar(100) [not null]
+  duration_min int [not null, note: 'Bội số 15 phút (BR-02)']
+  price int [not null, note: 'JPY']
+  is_active boolean [not null, default: true]
+  Note: 'Course chính: もみほぐし, ドライヘッドスパ...'
+}
+
+Table addon {
+  id int [pk, increment]
+  shop_id int [not null]
+  name varchar(100) [not null]
+  duration_min int [not null, note: 'Bội số 15 phút (BR-02)']
+  price int [not null, note: 'JPY']
+  is_active boolean [not null, default: true]
+  Note: 'Chỉ đi kèm course chính, không đứng một mình (BR-01)'
+}
+
+Table combo_restriction {
+  course_id int [not null]
+  addon_id int [not null]
+
+  indexes {
+    (course_id, addon_id) [pk]
+  }
+  Note: 'Tổ hợp course + add-on KHÔNG được phép (BR-09). Chưa có data - seed sau; bảng rỗng = mọi combo hợp lệ'
+}
+
+Table therapist {
+  id int [pk, increment]
+  shop_id int [not null]
+  name varchar(100) [not null]
+  gender gender [not null]
+}
+
+Table shift {
+  id int [pk, increment]
+  therapist_id int [not null]
+  work_date date [not null]
+  start_time time [not null]
+  end_time time [not null]
+
+  indexes {
+    (therapist_id, work_date, start_time) [unique]
+  }
+}
+
+Enum account_role {
+  admin
+  therapist
+}
+
+Table account {
+  id int [pk, increment]
+  username varchar(50) [unique, not null]
+  password_hash varchar(255) [not null]
+  role account_role [not null]
+  therapist_id int [null, note: 'Chỉ với role therapist - admin cấp tài khoản']
+  created_at datetime [not null]
+}
+
+Table customer {
+  id int [pk, increment]
+  phone varchar(20) [unique, not null, note: 'Khóa nhận dạng khách']
+  email varchar(255) [not null, note: 'Xác thực + nhận mã đặt chỗ (BR-15)']
+  member_type member_type [not null, default: 'guest']
+  rank varchar(20) [null, note: 'Chỉ để hiển thị (BR-20)']
+  visit_count int [not null, default: 0]
+}
+
+Table ng_list {
+  id int [pk, increment]
+  phone varchar(20) [unique, not null]
+  reason varchar(255) [null, note: 'Lý do cấm - có hiển thị (BR-20)']
+  added_at datetime [not null]
+  Note: 'SĐT bị cấm đặt chỗ (BR-06)'
+}
+
+Table time_slot {
+  id int [pk, increment]
+  shop_id int [not null]
+  slot_date date [not null]
+  start_time time [not null]
+  status slot_status [not null, default: 'available']
+
+  indexes {
+    (shop_id, slot_date, start_time) [unique]
+  }
+  Note: 'Hệ thống tự quản lý, cập nhật thời gian thực (BR-07, BR-08)'
+}
+
+Table booking {
+  id int [pk, increment]
+  booking_code varchar(30) [unique, null, note: 'BE sinh: {yyyyMMdd}-{shop_code}-{random} (BR-12)']
+  shop_id int [not null]
+  customer_id int [not null]
+  booking_date date [not null]
+  start_time time [not null]
+  party_size int [not null, default: 1, note: '1-3; >=2 là nhóm - cùng course, add-on riêng (BR-10, BR-14)']
+  status booking_status [not null, default: 'pending']
+  created_at datetime [not null]
+  updated_at datetime [null]
+  Note: 'Một lần đặt = 1 cuộc gọi, 1 mã POS'
+}
+
+Table reservation {
+  id int [pk, increment]
+  booking_id int [not null]
+  guest_no int [not null, note: 'Người thứ mấy trong nhóm']
+  main_course_id int [not null]
+  therapist_id int [null, note: 'Chỉ định đích danh — chỉ booking 1 người (BR-04)']
+  therapist_gender gender [null, note: 'Chỉ định theo giới tính — loại trừ với therapist_id']
+  slot_id int [null]
+
+  indexes {
+    (booking_id, guest_no) [unique]
+  }
+  Note: 'Suất phục vụ của TỪNG NGƯỜI trong booking (BR-10)'
+}
+
+Table reservation_addon {
+  reservation_id int [not null]
+  addon_id int [not null]
+
+  indexes {
+    (reservation_id, addon_id) [pk]
+  }
+}
+
+// ---------- Relationships ----------
+Ref: combo_restriction.course_id > course.id
+Ref: combo_restriction.addon_id > addon.id
+Ref: course.shop_id > shop.id
+Ref: addon.shop_id > shop.id
+Ref: therapist.shop_id > shop.id
+Ref: shift.therapist_id > therapist.id
+Ref: account.therapist_id > therapist.id
+Ref: time_slot.shop_id > shop.id
+Ref: booking.shop_id > shop.id
+Ref: booking.customer_id > customer.id
+Ref: reservation.booking_id > booking.id
+Ref: reservation.main_course_id > course.id
+Ref: reservation.therapist_id > therapist.id
+Ref: reservation.slot_id > time_slot.id
+Ref: reservation_addon.reservation_id > reservation.id
+Ref: reservation_addon.addon_id > addon.id

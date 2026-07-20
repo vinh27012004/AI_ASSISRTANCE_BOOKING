@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet data-dc-atomics><link href="https://fonts.googleapis.com/css2?family=Itim&display=swap" rel="stylesheet"><style>
+body{margin:0;background:#f0eee9;font-family:Itim,'Segoe Print',cursive}a{color:#2a78d6}a:hover{color:#1c5aa8}
+.wf{background:#fff;border:1.5px solid #444;border-radius:6px;overflow:hidden;box-shadow:2px 3px 0 rgba(0,0,0,.08)}
+.wt{display:flex;gap:8px;align-items:center;padding:6px 12px;border-bottom:1.5px solid #444;background:#f7f5f0;font-size:12px;color:#555}
+.dot{width:9px;height:9px;border:1.2px solid #777;border-radius:50%}
+.row{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.box{border:1.2px solid #8a8a8a;border-radius:4px;padding:2px 8px;font-size:11px;background:#fff;color:#333;white-space:nowrap}
+.box.f{background:#eceae4}.box.b{background:#333;color:#fff;border-color:#333}.box.a{border-color:#2a78d6;color:#2a78d6}
+.chip{border:1.1px solid #999;border-radius:3px;padding:0 6px;font-size:10px;color:#444;background:#fff;white-space:nowrap}
+.chip.on{background:#3a3a3a;color:#fff;border-color:#3a3a3a}.chip.ac{background:#eaf2fc;border-color:#2a78d6;color:#1c5aa8}
+.sec{display:flex;flex-wrap:wrap;gap:10px;padding:7px 12px;border-bottom:1px dashed #c9c4b8;align-items:flex-start}
+.sl{width:104px;flex:none;font-size:11px;color:#777;padding-top:3px}
+.note{background:#fff8c8;border:1px solid #d9c96b;font-size:10.5px;color:#6b5d1e;padding:1px 7px;border-radius:3px;white-space:nowrap}
+.flow{display:flex;flex-direction:column;align-items:center;gap:2px;padding:10px 0;color:#b0483f;font-size:13px}
+.flow b{font-size:20px;line-height:1}
+.trow{position:relative;height:30px;border-bottom:1px solid #d8d4ca;background:repeating-linear-gradient(90deg,transparent 0 19px,#eae7df 19px 20px)}
+.seg{position:absolute;top:0;bottom:0}
+.s-sci{background:#dcd7cb}.s-blk{background:#5a5a5a;background-image:repeating-linear-gradient(45deg,transparent 0 4px,rgba(255,255,255,.18) 4px 7px)}.s-bkd{background:#2a78d6}
+.tname{width:96px;flex:none;font-size:10.5px;color:#333;border-right:1.2px solid #888;padding:2px 6px;line-height:1.25}
+.hh{width:40px;flex:none;font-size:9.5px;text-align:center;border-right:1px solid #bbb;color:#5a4632;background:#e8e2d5;line-height:1.2}
+a.chip,a.box{text-decoration:none}
+.hd{display:flex;align-items:baseline;gap:10px;margin:0 0 18px;flex-wrap:wrap}
+.bdg{font:600 10px ui-monospace,Menlo,monospace;padding:3px 7px;background:#1a1a1a;color:#fff;border-radius:4px}
+</style></helmet>
+<template id="__bundler_thumbnail"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 80 56"><rect width="80" height="56" fill="#2a78d6"/><rect x="24" y="17" width="32" height="6" rx="1.5" fill="#fff"/><rect x="24" y="26" width="32" height="4" rx="1.5" fill="#eaf2fc"/><rect x="24" y="33" width="20" height="4" rx="1.5" fill="#eaf2fc"/></svg></template>
+<div style="max-width:800px;margin:0 auto;padding:36px 20px 60px;display:flex;flex-direction:column">
+<div class="wf" style="margin-bottom:18px"><div class="wt"><span class="dot"></span><span class="dot"></span><b style="color:#333">Đặt lịch massage — wireframe</b><span style="flex:1"></span><a class="chip" href="./01-chon-cua-hang.dc.html">1 Cửa hàng</a><a class="chip on" href="./02-booking.dc.html">2 Booking</a><a class="chip" href="./03-thong-tin-khach.dc.html">3 Thông tin</a><a class="chip" href="./04-xac-nhan.dc.html">4 Xác nhận</a><a class="chip" href="./05-thanh-cong.dc.html">5 Xong</a></div></div>
+<div class="hd"><span class="bdg">02</span><b style="font-size:16px;color:#1a1a1a">Bước 2 — Booking slot: timeline + form đặt chỗ 1 trang</b></div>
+<div class="wf" data-screen-label="Timeline">
+<div class="wt"><span class="dot"></span><span class="dot"></span><b style="color:#333">Lịch slot — bảng màu rút gọn</b><span style="flex:1"></span><span class="box">◀</span><span class="box f">Hôm nay · 15/07 T4</span><span class="box">▶</span><span class="box">Cửa hàng A ▾</span><span class="box">Lọc trạng thái ▾</span><span class="chip">5p</span><span class="chip on">30p</span></div>
+<div class="sec" style="align-items:center"><span class="sl" style="width:auto;padding:0">Chú giải (chỉ 3 trạng thái):</span><span class="chip" style="border-style:dashed">Trống — đặt được</span><span class="chip ac">■ Đã đặt (kèm tên course)</span><span class="chip" style="background:#eceae4">▨ Ngoài ca / khoá</span><span class="note">màu ít + luôn có chữ/icon, không bắt nhớ màu</span></div>
+<div style="display:flex">
+<div style="flex:1;position:relative">
+<div style="display:flex"><span class="tname" style="background:#e8e2d5;border-right:none"></span><span class="hh" style="background:#f0ece2;color:#555">09</span><span class="hh" style="background:#f0ece2;color:#555">10</span><span class="hh" style="background:#f0ece2;color:#555">11</span><span class="hh" style="background:#f0ece2;color:#555">12</span><span class="hh" style="background:#f0ece2;color:#555">13</span><span class="hh" style="background:#f0ece2;color:#555">14</span><span class="hh" style="background:#f0ece2;color:#555">15</span><span class="hh" style="background:#f0ece2;color:#555">16</span><span class="hh" style="background:#f0ece2;color:#555">17</span><span class="hh" style="background:#f0ece2;color:#555">18</span><span class="hh" style="background:#f0ece2;color:#555">19</span><span class="hh" style="background:#f0ece2;color:#555">20</span><span class="hh" style="background:#f0ece2;color:#555">21</span><span class="hh" style="background:#f0ece2;color:#555">…</span></div>
+<div style="display:flex"><span class="tname">◯ Hana<br><span style="color:#888">chưa vào ca · SCI ✓</span></span><div class="trow" style="flex:1;background:#fff"><span class="seg s-bkd" style="left:440px;width:76px;border-radius:3px;color:#fff;font-size:8.5px;padding:2px 4px">Bóp lưng 115p</span></div></div>
+<div style="display:flex"><span class="tname">◯ Akiyama<br><span style="color:#888">chưa vào ca</span></span><div class="trow" style="flex:1;background:#fff"><span class="seg s-bkd" style="left:120px;width:48px;border-radius:3px;color:#fff;font-size:8.5px;padding:2px 4px">Chân 60p</span></div></div>
+<div style="display:flex"><span class="tname">◯ NV 450<br><span style="color:#888">ca 15:00–20:00</span></span><div class="trow" style="flex:1;background:#fff"><span class="seg" style="left:0;width:240px;background:#eceae4;background-image:repeating-linear-gradient(45deg,transparent 0 5px,#d8d4c8 5px 7px)"></span><span class="seg" style="left:440px;right:0;background:#eceae4;background-image:repeating-linear-gradient(45deg,transparent 0 5px,#d8d4c8 5px 7px)"></span></div></div>
+<div style="position:absolute;top:14px;bottom:0;left:436px;border-left:1.5px dashed #c0392b"></div>
+<div class="note" style="position:absolute;left:220px;bottom:-2px">slot trống nào cũng trắng — click là đặt</div>
+</div>
+</div>
+</div>
+<div class="flow"><span>Click slot trống</span><b>▼</b><span>mở form booking đầy đủ (1 trang)</span></div>
+<div class="wf" data-screen-label="Form booking">
+<div class="wt"><b style="color:#333">Form đặt chỗ</b><span style="flex:1"></span><span class="chip">✕</span></div>
+<div class="sec"><span class="sl">Giờ bắt đầu</span><span class="chip on">Ngày</span><span class="box" style="min-width:150px">2026-07-15 Thứ 4</span><span class="chip on">Giờ</span><span class="box">12:00</span><span class="chip">Số phiếu</span><span class="box f" style="min-width:60px">&nbsp;</span></div>
+<div class="sec"><span class="sl">◉ Hội viên</span><span class="chip on">Số thẻ No.</span><span class="box" style="min-width:110px">111111111</span><span class="box a">Tìm</span><span class="chip">SĐT</span><span class="box f">4 số cuối…</span><span class="chip">Năm sinh</span><span class="box">– ▾</span><span class="box">– ▾</span><span class="box a">Tìm</span><span class="chip">Giới tính</span><span class="chip">○ Nam</span><span class="chip">○ Nữ</span></div>
+<div class="sec"><span class="sl">○ Khách lẻ</span><span class="chip">Tên</span><span class="box" style="min-width:110px">Khách</span><span class="chip">SĐT</span><span class="box f">0901112222 (không "-")</span><span class="chip">Năm sinh</span><span class="box">– ▾</span><span class="box">– ▾</span><span class="chip">Giới tính</span><span class="chip">○ Nam</span><span class="chip">○ Nữ</span></div>
+<div class="sec" style="gap:0;padding-bottom:0"><span class="box b" style="border-radius:4px 4px 0 0">Đặt chỗ</span><span class="box" style="border-radius:4px 4px 0 0;border-bottom:none;color:#2a78d6">Không thể đặt</span></div>
+<div class="sec"><span class="box b">HV Royal</span><span class="box f">–</span><span class="box b">HV App</span><span class="box f">–</span><span class="box b">HV Thẻ</span><span class="box f">–</span><span class="box b">Không HV</span><span class="box b">HV Senior</span><span class="box b">HV WEB</span></div>
+<div class="sec" style="align-items:center"><span class="box b">Course đã chọn</span><span style="font-size:10.5px;color:#555">Bóp lưng: 0p · Chân: 0p · Head: 0p · Hand: 0p · Cổ: 0p · Bắp chân: 0p · <b>Tổng: 0p</b></span><span class="box a">Ưu đãi・vé lượt</span></div>
+<div class="sec"><span class="sl">Course</span>
+<div style="display:flex;flex-direction:column;gap:7px;flex:1">
+<div class="row"><span class="box f" style="min-width:96px;text-align:center"><b>Mát-xa bóp</b></span><span class="chip">15</span><span class="chip">30</span><span class="chip">45</span><span class="chip on">60</span><span class="chip">75</span><span class="chip">90</span><span class="chip">105</span><span class="chip">120</span><span class="chip">…</span><span class="chip">300</span><span class="note">chips = số phút, cuộn ngang</span></div>
+<div class="row"><span class="box f" style="min-width:96px;text-align:center"><b>Bấm huyệt chân</b></span><span class="chip">15</span><span class="chip">30</span><span class="chip">45</span><span class="chip">60</span><span class="chip">…</span><span class="chip">120</span></div>
+<div class="row"><span class="box f" style="min-width:96px;text-align:center"><b>Head spa khô</b></span><span class="chip">15</span><span class="chip">30</span><span class="box f" style="min-width:96px;text-align:center;margin-left:14px"><b>Hand refle</b></span><span class="chip">15</span><span class="chip">30</span></div>
+<div class="row"><span class="box f" style="min-width:96px;text-align:center"><b>Bathi spa</b></span><span class="chip">15</span><span class="chip">30</span></div>
+</div></div>
+<div class="sec"><span class="sl">Tuỳ chọn</span><div class="row" style="flex:1"><span class="chip">Nệm premium</span><span class="chip">Cool nệm premium</span><span class="chip">Tập trung cổ-vai</span><span class="chip">Tập trung lưng</span><span class="chip">Tập trung eo</span><span class="chip">Gối HPM</span><span class="chip">Đồ recovery S/M/L</span><span class="chip">…</span></div></div>
+<div class="sec"><span class="sl">Vùng mỏi</span><div class="row" style="flex:1"><span class="chip ac">Cổ</span><span class="chip ac">Lưng</span><span class="chip ac">Vai P</span><span class="chip ac">Vai T</span><span class="chip ac">Tay P</span><span class="chip ac">Tay T</span><span class="chip ac">Eo</span><span class="chip ac">Mông</span><span class="chip ac">Đùi</span><span class="chip ac">Bắp chân</span><span class="chip ac">…</span></div></div>
+<div class="sec"><span class="sl">Kênh đặt</span><div class="row"><span class="chip">HP</span><span class="chip">App</span><span class="chip">IVR</span><span class="chip on">Bảng trắng số</span><span class="chip">Call center</span><span class="chip">AI</span></div><span class="sl" style="width:90px">Không chạm</span><div class="row" style="flex:1"><span class="chip">Cổ</span><span class="chip">Lưng</span><span class="chip">Vai</span><span class="chip">Tay</span><span class="chip">…</span></div></div>
+<div class="sec"><span class="sl">Interval</span><div class="row"><span class="chip">0</span><span class="chip">5</span><span class="chip on">10</span><span class="chip">15</span></div><span class="sl" style="width:70px">Chỉ định</span><div class="row"><span class="chip on">Không</span><span class="chip">NV nam</span><span class="chip">Đích danh</span></div><span class="sl" style="width:96px">Trò chuyện</span><div class="row"><span class="chip on">Không yêu cầu</span><span class="chip">Ít nói, yên tĩnh</span><span class="chip">Hỏi lực thường xuyên</span></div></div>
+<div class="sec"><span class="sl">Ghi chú</span><span class="box f" style="flex:1;height:34px"></span><span class="sl" style="width:60px">Lực</span><div class="row"><span class="chip">Mạnh</span><span class="chip">Hơi mạnh</span><span class="chip on">Vừa</span><span class="chip">Hơi nhẹ</span><span class="chip">Nhẹ</span></div><span class="sl" style="width:64px">Thay đồ</span><div class="row"><span class="chip">Có</span><span class="chip">Không</span></div></div>
+<div class="sec" style="border-bottom:none;justify-content:flex-end;align-items:center"><span style="font-size:10px;color:#888">Từ 2 người: nhập số HV sau khi tạo phiếu</span><span class="chip">Đặt gộp</span><span class="box">1 ▾</span><a class="box" href="./01-chon-cua-hang.dc.html">Đóng</a><a class="box b" href="./03-thong-tin-khach.dc.html">Đăng ký ▶</a></div>
+</div>
+</div>
+</x-dc>
+</body>
+</html>
