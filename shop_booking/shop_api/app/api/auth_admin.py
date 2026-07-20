@@ -115,6 +115,10 @@ def login():
         "access_token": access_token,
         "role": account.role.value,
         "therapist_id": account.therapist_id,
+        "username": account.username,
+        # Therapist có tên thật thì hiện tên cho dễ nhận; admin không gắn với bản
+        # ghi therapist nào nên đành lấy username.
+        "display_name": account.therapist.name if account.therapist else account.username,
         "expires_in": 28800,
     }), 200
 
@@ -839,11 +843,23 @@ def admin_list_bookings():
                 "duration_min": course.duration_min,
                 "price": course.price,
             } if course else None,
+            # `id` + `therapist_id` để admin đổi được người phụ trách (3.7);
+            # `requested_therapist_name` cho thấy khách xin ai mà thực tế ai làm.
             "reservations": [{
+                "id": r.id,
                 "guest_no": r.guest_no,
+                # Add-on mỗi khách một khác nên lượt dài ngắn khác nhau — FE cần
+                # con số này mới biết ca của ai phủ nổi lượt nào.
+                "duration_min": r.main_course.duration_min + sum(
+                    a.duration_min for a in r.addons
+                ),
+                "therapist_id": r.therapist_id,
                 "therapist_name": r.therapist.name if r.therapist else None,
+                "requested_therapist_name": (
+                    r.requested_therapist.name if r.requested_therapist else None
+                ),
                 "addons": [{"id": a.id, "name": a.name} for a in r.addons],
-            } for r in b.reservations],
+            } for r in sorted(b.reservations, key=lambda r: r.guest_no)],
         })
 
     return jsonify({
@@ -901,4 +917,124 @@ def admin_update_booking_status(id):
         "id": booking.id,
         "booking_code": booking.booking_code,
         "status": booking.status.value,
+    }), 200
+
+
+# ============================================================
+# 3.7 PATCH /admin/bookings/<id>/reservations/<rid>/therapist
+# ============================================================
+@api_bp.route(
+    "/admin/bookings/<int:booking_id>/reservations/<int:reservation_id>/therapist",
+    methods=["PATCH"],
+)
+@admin_required
+def admin_assign_reservation_therapist(booking_id, reservation_id):
+    """Admin đổi người phụ trách cho MỘT khách trong booking.
+
+    Nhóm từ 2 người không được chỉ định nhân viên (BR-04) nên BE tự phân công lúc
+    tạo booking — đây là chỗ duy nhất sửa lại phân công đó, cũng là cách duy nhất
+    để admin xếp người cho nhóm đông.
+
+    KHÔNG đụng `requested_therapist_id`: đó là "khách đã yêu cầu ai", phải giữ
+    nguyên để còn đối chiếu với "thực tế ai làm" (BR-21).
+    """
+    from app.models.shop import Reservation
+
+    booking = Booking.query.get(booking_id)
+    if not booking:
+        raise APIError(404, "RESOURCE_NOT_FOUND", "Không tìm thấy dữ liệu yêu cầu.")
+
+    reservation = Reservation.query.filter_by(
+        id=reservation_id, booking_id=booking_id
+    ).first()
+    if not reservation:
+        raise APIError(404, "RESOURCE_NOT_FOUND", "Không tìm thấy dữ liệu yêu cầu.")
+
+    # Booking đã huỷ/đã xong thì phân công chỉ còn là dữ liệu lịch sử.
+    if booking.status not in (BookingStatus.CONFIRMED, BookingStatus.PENDING):
+        raise APIError(
+            422,
+            "INVALID_STATUS_TRANSITION",
+            "Chỉ đổi được nhân viên cho đơn đang chờ hoặc đã xác nhận.",
+            {"status": booking.status.value},
+        )
+
+    data = request.get_json() or {}
+    if "therapist_id" not in data:
+        raise APIError(400, "VALIDATION_ERROR", "Dữ liệu không hợp lệ, vui lòng kiểm tra lại.", {"fields": {"therapist_id": "Missing"}})
+
+    therapist = Therapist.query.get(data["therapist_id"])
+    if not therapist or therapist.shop_id != booking.shop_id:
+        raise APIError(
+            422,
+            "VALIDATION_ERROR",
+            "Nhân viên không thuộc cửa hàng của đơn này.",
+            {"fields": {"therapist_id": "Not in this shop"}},
+        )
+
+    # Lượt này dài bao lâu — add-on của từng khách khác nhau nên phải cộng riêng.
+    dur = reservation.main_course.duration_min + sum(
+        a.duration_min for a in reservation.addons
+    )
+    start_min = time_to_minutes(booking.start_time)
+    end_min = start_min + dur
+
+    covered = any(
+        time_to_minutes(s.start_time) <= start_min
+        and time_to_minutes(s.end_time) >= end_min
+        for s in Shift.query.filter_by(
+            therapist_id=therapist.id, work_date=booking.booking_date
+        ).all()
+    )
+    if not covered:
+        raise APIError(
+            422,
+            "THERAPIST_OFF_SHIFT",
+            f"{therapist.name} không có ca làm phủ hết lượt này. Hãy xếp ca trước.",
+            {"required": {
+                "date": booking.booking_date.strftime("%Y-%m-%d"),
+                "from": f"{start_min // 60:02d}:{start_min % 60:02d}",
+                "to": f"{end_min // 60:02d}:{end_min % 60:02d}",
+            }},
+        )
+
+    # Trùng giờ với lượt khác của chính nhân viên đó — kể cả lượt của khách khác
+    # trong CÙNG booking (một người không phục vụ hai khách cùng lúc).
+    others = (
+        db.session.query(Reservation)
+        .join(Booking)
+        .filter(
+            Reservation.therapist_id == therapist.id,
+            Reservation.id != reservation.id,
+            Booking.booking_date == booking.booking_date,
+            Booking.status.in_([BookingStatus.CONFIRMED, BookingStatus.PENDING]),
+        )
+        .all()
+    )
+    for r in others:
+        o_start = time_to_minutes(r.booking.start_time)
+        o_end = o_start + r.main_course.duration_min + sum(
+            a.duration_min for a in r.addons
+        )
+        if max(start_min, o_start) < min(end_min, o_end):
+            raise APIError(
+                409,
+                "SLOT_CONFLICT",
+                f"{therapist.name} đã có lượt khác trùng giờ ({r.booking.booking_code}).",
+                {"conflict_booking_code": r.booking.booking_code},
+            )
+
+    try:
+        reservation.therapist_id = therapist.id
+        booking.updated_at = datetime.now()
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        raise
+
+    return jsonify({
+        "reservation_id": reservation.id,
+        "guest_no": reservation.guest_no,
+        "therapist_id": therapist.id,
+        "therapist_name": therapist.name,
     }), 200

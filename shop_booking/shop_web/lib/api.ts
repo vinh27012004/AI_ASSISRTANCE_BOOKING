@@ -64,6 +64,21 @@ type ErrorBody = {
   error?: { code?: string; message?: string; details?: Record<string, unknown> };
 };
 
+/**
+ * Những gì lưu ở localStorage sau khi đăng nhập. `display_name` để hiện góc phải
+ * — token là JWT chứ không phải nơi tra cứu tên, và gọi API chỉ để lấy tên thì
+ * mỗi lần tải trang lại chớp một nhịp "chưa biết bạn là ai".
+ *
+ * Dữ liệu cũ (trước khi có tên) thiếu hai trường này nên đều phải optional; chỗ
+ * đọc tự lùi về `username` rồi mới tới role.
+ */
+export type StoredUser = {
+  role: "admin" | "therapist";
+  therapist_id: number | null;
+  username?: string;
+  display_name?: string;
+};
+
 export const authStorage = {
   getToken() {
     if (typeof window === "undefined") return null;
@@ -80,11 +95,11 @@ export const authStorage = {
   getUser() {
     if (typeof window === "undefined") return null;
     const userStr = localStorage.getItem("user_info");
-    return userStr ? JSON.parse(userStr) as { role: "admin" | "therapist"; therapist_id: number | null } : null;
+    return userStr ? JSON.parse(userStr) as StoredUser : null;
   },
-  setUser(role: "admin" | "therapist", therapistId: number | null) {
+  setUser(user: StoredUser) {
     if (typeof window === "undefined") return;
-    localStorage.setItem("user_info", JSON.stringify({ role, therapist_id: therapistId }));
+    localStorage.setItem("user_info", JSON.stringify(user));
   },
   clearUser() {
     if (typeof window === "undefined") return;
@@ -301,6 +316,20 @@ export const api = {
     if (params.page) qs.set("page", String(params.page));
     if (params.per_page) qs.set("per_page", String(params.per_page));
     return request<AdminBookingsResponse>(`/admin/bookings?${qs}`, { signal });
+  },
+
+  /** Đổi người phụ trách một suất khách. BE chặn nếu lệch ca hoặc trùng lịch. */
+  adminAssignTherapist(bookingId: number, reservationId: number, therapistId: number) {
+    return request<{
+      reservation_id: number;
+      guest_no: number;
+      therapist_id: number;
+      therapist_name: string;
+    }>(`/admin/bookings/${bookingId}/reservations/${reservationId}/therapist`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ therapist_id: therapistId }),
+    });
   },
 
   adminUpdateBookingStatus(bookingId: number, status: string) {

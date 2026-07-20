@@ -32,7 +32,12 @@ export default function LoginPage() {
     try {
       const res = await api.login({ username, password });
       authStorage.setToken(res.access_token);
-      authStorage.setUser(res.role, res.therapist_id);
+      authStorage.setUser({
+        role: res.role,
+        therapist_id: res.therapist_id,
+        username: res.username,
+        display_name: res.display_name,
+      });
       
       if (res.role === "admin") {
         router.push("/admin/bookings");

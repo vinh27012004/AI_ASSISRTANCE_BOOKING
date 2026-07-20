@@ -3,6 +3,7 @@
 import { useRouter } from "next/navigation";
 import { authStorage } from "@/lib/api";
 import { AuthGuard } from "@/components/auth-guard";
+import { UserBadge } from "@/components/user-badge";
 import { Button } from "@/components/ui";
 
 export default function TherapistLayout({ children }: { children: React.ReactNode }) {
@@ -24,13 +25,16 @@ export default function TherapistLayout({ children }: { children: React.ReactNod
               <h1 className="text-xl font-bold text-accent">Riraku Therapist</h1>
               <p className="text-xs text-ink-3">Lịch làm việc của nhân viên trị liệu</p>
             </div>
-            <Button
-              variant="outline"
-              onClick={handleLogout}
-              className="text-danger border-danger-line hover:bg-danger-soft"
-            >
-              Đăng xuất
-            </Button>
+            <div className="flex items-center gap-4">
+              <UserBadge />
+              <Button
+                variant="outline"
+                onClick={handleLogout}
+                className="text-danger border-danger-line hover:bg-danger-soft"
+              >
+                Đăng xuất
+              </Button>
+            </div>
           </div>
         </header>
 

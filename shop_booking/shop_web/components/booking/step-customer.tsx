@@ -61,7 +61,9 @@ export function StepCustomer({
   return (
     <>
       <Field label="Số điện thoại" hint="Chỉ nhập số, không có dấu “-”">
-        <form onSubmit={lookup} className="flex flex-wrap items-start gap-2">
+        {/* Cùng max-w-md với ô Email bên dưới để hai ô thẳng mép phải — SĐT chỉ
+            8–15 chữ số, kéo dài hết hàng vừa xấu vừa vô ích. */}
+        <form onSubmit={lookup} className="flex max-w-md flex-wrap items-start gap-2">
           <div className="min-w-0 flex-1">
             <TextInput
               value={phone}

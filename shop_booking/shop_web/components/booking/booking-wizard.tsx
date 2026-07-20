@@ -149,7 +149,7 @@ export function BookingWizard() {
   };
 
   return (
-    <div className="w-full px-4 py-6 sm:px-6">
+    <div className="mx-auto w-full max-w-6xl px-4 py-6 sm:px-6">
       {/* Thanh điều hướng bước — hộp ôm sát dãy bước, căn giữa khung. Viền nhẹ
           (không dùng khung cửa sổ .wf) vì kéo hết bề ngang sẽ thành hộp rỗng. */}
       <div className="mb-5 flex justify-center">
@@ -175,27 +175,30 @@ export function BookingWizard() {
         </StepWindow>
       ) : null}
 
-      {/* Bước 2 tự vẽ hai cửa sổ (Lịch slot + Form đặt chỗ) như wireframe 02 */}
+      {/* Wireframe 02: "timeline + form đặt chỗ 1 trang" — một cửa sổ liền mạch,
+          bên trong chia hai mục Lịch slot / Form đặt chỗ. */}
       {step === 2 && shop && date ? (
-        <StepServices
-          shop={shop}
-          date={date}
-          partySize={partySize}
-          services={services}
-          courseId={courseId}
-          guestAddons={guestAddons}
-          therapistGender={therapistGender}
-          therapist={therapist}
-          startTime={startTime}
-          onSelectCourse={selectCourse}
-          onChangeGuestAddons={setGuestAddons}
-          onSelectTherapistGender={selectTherapistGender}
-          onSelectTherapist={selectTherapist}
-          onSelectStartTime={setStartTime}
-          onSelectDate={browseDate}
-          onBack={() => setStep(1)}
-          onNext={() => setStep(3)}
-        />
+        <StepWindow step={2}>
+          <StepServices
+            shop={shop}
+            date={date}
+            partySize={partySize}
+            services={services}
+            courseId={courseId}
+            guestAddons={guestAddons}
+            therapistGender={therapistGender}
+            therapist={therapist}
+            startTime={startTime}
+            onSelectCourse={selectCourse}
+            onChangeGuestAddons={setGuestAddons}
+            onSelectTherapistGender={selectTherapistGender}
+            onSelectTherapist={selectTherapist}
+            onSelectStartTime={setStartTime}
+            onSelectDate={browseDate}
+            onBack={() => setStep(1)}
+            onNext={() => setStep(3)}
+          />
+        </StepWindow>
       ) : null}
 
       {step === 3 && shop ? (

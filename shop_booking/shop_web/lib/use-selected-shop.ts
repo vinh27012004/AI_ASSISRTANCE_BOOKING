@@ -45,3 +45,15 @@ function getServerSnapshot(): number | null {
 export function useSelectedShopId(): number | null {
   return useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
 }
+
+/**
+ * Đổi shop đang chọn. Phải bắn EVENT thủ công vì `storage` không tự bắn trong
+ * chính tab vừa ghi — thiếu nó thì đổi shop ở ô lọc mà sidebar vẫn đứng yên.
+ *
+ * Để ở đây (không phải trong layout) vì giờ có hai chỗ đổi shop: sidebar và ô
+ * lọc trên trang đặt lịch. Hai bản chép sẽ lệch nhau ngay lần sửa đầu tiên.
+ */
+export function setSelectedShopId(id: number) {
+  localStorage.setItem(KEY, String(id));
+  window.dispatchEvent(new Event(EVENT));
+}

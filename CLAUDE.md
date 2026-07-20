@@ -81,7 +81,8 @@ Mọi lỗi đều là `{"error": {"code", "message", "details?"}}`, dựng bở
 ### FE
 
 - **Fetch dữ liệu**: hook `useRequest(key, fetcher)` trong `lib/use-request.ts`. `key === null` = chưa đủ điều kiện, không gọi. Kết quả về muộn của key cũ bị bỏ qua theo `stamp` nên đổi lựa chọn nhanh không gây race. Dùng hook này thay vì tự `useEffect` + `fetch`.
-- **Luồng đặt chỗ** là wizard 5 bước, toàn bộ state nằm ở `components/booking/booking-wizard.tsx`; các `step-*.tsx` chỉ nhận props. Bước 2 tự vẽ hai cửa sổ riêng (Lịch slot + Form đặt chỗ), không dùng `StepWindow`.
+- **Luồng đặt chỗ** là wizard 5 bước, toàn bộ state nằm ở `components/booking/booking-wizard.tsx`; các `step-*.tsx` chỉ nhận props. Cả 5 bước dùng chung khung `StepWindow` — bước 2 là một trang liền mạch (timeline + form trong cùng một cửa sổ), chia mục bằng `SectionBar` chứ không tách thành hai `Card`.
+- **Bước 2 cố ý xếp ngược wireframe**: mục 1 "Chọn dịch vụ" (course/add-on/chỉ định) nằm TRÊN mục 2 "Chọn giờ" (timeline). Wireframe vẽ timeline trước rồi mũi tên "click slot ▼ mở form", nhưng `GET /slots` bắt buộc có `courseId` — chưa chọn course thì timeline rỗng, không thể là thứ đầu tiên khách thấy. Xếp theo wireframe thì khách phải cuộn xuống chọn course rồi lộn lên bấm slot. Đừng đảo lại.
 - **Auth**: `lib/api.ts` → `authStorage` (localStorage) + `components/auth-guard.tsx`. AuthGuard đọc localStorage qua `useSyncExternalStore` và trả chuỗi thô — trả object đã parse sẽ re-render vô hạn.
 - **UI primitives** dùng chung ở `components/ui.tsx` (`Card`, `WindowBar`, `Button`, `Chip`, `Field`, `Alert`, `Note`…). Cho `<Link>` trông như button thì dùng `buttonClass(variant)`, đừng lồng `<Link>` trong `<button>`.
 

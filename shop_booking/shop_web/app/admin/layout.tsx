@@ -4,31 +4,34 @@ import { useEffect, useState } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import Link from "next/link";
 import { authStorage, api } from "@/lib/api";
+import {
+  useSelectedShopId,
+  setSelectedShopId as storeSelectedShopId,
+} from "@/lib/use-selected-shop";
 import type { Shop } from "@/lib/types";
 import { AuthGuard } from "@/components/auth-guard";
+import { UserBadge } from "@/components/user-badge";
 import { Button, Spinner } from "@/components/ui";
 
 export default function AdminLayout({ children }: { children: React.ReactNode }) {
   const [shops, setShops] = useState<Shop[]>([]);
-  const [selectedShopId, setSelectedShopId] = useState<number | null>(null);
   const [loadingShops, setLoadingShops] = useState(true);
   const router = useRouter();
   const pathname = usePathname();
 
+  // Đọc từ store dùng chung chứ không giữ state riêng: trang đặt lịch cũng có ô
+  // lọc cửa hàng, giữ bản sao ở đây thì đổi bên đó sidebar sẽ đứng yên với giá
+  // trị cũ.
+  const selectedShopId = useSelectedShopId();
+
   useEffect(() => {
-    // Fetch shops for admin selection
     const fetchShops = async () => {
       try {
         const data = await api.shops();
         setShops(data);
-        if (data.length > 0) {
-          const stored = localStorage.getItem("admin_selected_shop_id");
-          if (stored) {
-            setSelectedShopId(Number(stored));
-          } else {
-            setSelectedShopId(data[0].id);
-            localStorage.setItem("admin_selected_shop_id", String(data[0].id));
-          }
+        // Lần đầu vào admin chưa chọn gì — mặc định cửa hàng đầu tiên.
+        if (data.length > 0 && localStorage.getItem("admin_selected_shop_id") === null) {
+          storeSelectedShopId(data[0].id);
         }
       } catch (err) {
         console.error("Failed to load shops", err);
@@ -38,13 +41,6 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
     };
     fetchShops();
   }, []);
-
-  const handleShopChange = (id: number) => {
-    setSelectedShopId(id);
-    localStorage.setItem("admin_selected_shop_id", String(id));
-    // Trigger custom event so other components know the shop changed
-    window.dispatchEvent(new Event("admin_shop_changed"));
-  };
 
   const handleLogout = () => {
     authStorage.clearToken();
@@ -84,7 +80,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
               ) : (
                 <select
                   value={selectedShopId || ""}
-                  onChange={(e) => handleShopChange(Number(e.target.value))}
+                  onChange={(e) => storeSelectedShopId(Number(e.target.value))}
                   className="w-full rounded-lg border border-line-strong bg-canvas px-3 py-2 text-sm text-ink focus:border-accent focus:outline-none"
                 >
                   {shops.map((shop) => (
@@ -129,8 +125,13 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
         </aside>
 
         {/* Main Content Area */}
-        <main className="flex-1 overflow-y-auto p-6 md:p-8">
-          {children}
+        <main className="flex-1 overflow-y-auto">
+          {/* Thanh trên cùng chỉ để biết đang thao tác bằng tài khoản nào —
+              sticky vì bảng đặt lịch cuộn dài, cuộn xuống vẫn phải thấy. */}
+          <div className="sticky top-0 z-10 flex justify-end border-b border-line bg-surface px-6 py-2.5 md:px-8">
+            <UserBadge />
+          </div>
+          <div className="p-6 md:p-8">{children}</div>
         </main>
       </div>
     </AuthGuard>

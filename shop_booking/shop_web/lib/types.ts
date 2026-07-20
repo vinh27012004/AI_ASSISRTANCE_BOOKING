@@ -142,6 +142,9 @@ export type LoginResponse = {
   access_token: string;
   role: "admin" | "therapist";
   therapist_id: number | null;
+  username: string;
+  /** Therapist thì là tên thật, admin thì trùng `username`. */
+  display_name: string;
   expires_in: number;
 };
 
@@ -161,8 +164,15 @@ export type AdminBookingItem = {
   };
   course: Course | null;
   reservations: {
+    id: number;
     guest_no: number;
+    /** Course + add-on RIÊNG của khách này, nên mỗi suất một khác. */
+    duration_min: number;
+    /** BE phân công (BR-21) — admin sửa được. */
+    therapist_id: number | null;
     therapist_name: string | null;
+    /** Khách chỉ định đích danh ai, chỉ có ở booking 1 người (BR-04). */
+    requested_therapist_name: string | null;
     addons: { id: number; name: string }[];
   }[];
 };
