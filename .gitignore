@@ -1,0 +1,57 @@
+# ============================================================
+# Root .gitignore — repo AI_ASSISRTANCE_BOOKING
+# FE (shop_web) có .gitignore riêng cho node/next; file này lo
+# phần Python (shop_api), virtualenv dùng chung, và rác chung.
+# ============================================================
+
+# --- Virtualenv dùng chung (nằm ở gốc repo, xem CLAUDE.md) ---
+.venv/
+venv/
+env/
+ENV/
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# --- Biến môi trường / bí mật (BE: DATABASE_URL, SECRET_KEY) ---
+# .flaskenv được commit có chủ đích (chỉ chứa FLASK_APP/FLASK_DEBUG).
+.env
+.env.*
+!.env.example
+
+# --- MySQL / Docker data cục bộ ---
+mysql-data/
+*.sqlite3
+*.db
+
+# --- Log ---
+*.log
+logs/
+
+# --- Hệ điều hành ---
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- IDE / editor ---
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# --- Node (phòng khi có tooling ở gốc; shop_web tự lo phần của nó) ---
+node_modules/
