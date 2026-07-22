@@ -46,6 +46,23 @@
 
 > Lưu ý i18n: khách cuối là người Nhật — khi làm thật, `message` sẽ dịch sang tiếng Nhật hoặc trả message-key cho FE dịch. Giai đoạn dev dùng tiếng Việt cho dễ debug.
 
+> `ADDON_WITHOUT_COURSE` (BR-01) hiện **không phát sinh qua FE**: `course_id` là field bắt buộc ở `POST /bookings`, nên add-on không thể tồn tại thiếu course — thiếu course sẽ trả `VALIDATION_ERROR`. Giữ mã này trong catalog để chatbot giai đoạn 2 (không đi qua FE) dùng khi gửi payload chỉ có add-on.
+
+### 0.2b Lỗi CRUD admin (nhóm 3) — bổ sung ngoài catalog chính
+
+> Các mã 409/422 riêng của cụm quản trị. Không nằm trong luồng đặt chỗ nên tách khỏi bảng 0.2 cho gọn.
+
+| HTTP | code | message | details | Phát sinh ở |
+|---|---|---|---|---|
+| 409 | `RESOURCE_IN_USE` | "Không thể xóa vì dữ liệu đang được sử dụng. Hãy tắt hiển thị (is_active = false) thay vì xóa." (message đổi theo tài nguyên) | `{used_by, count}` | DELETE course / addon / therapist / shift đang được tham chiếu |
+| 409 | `COMBO_RESTRICTION_EXISTS` | "Cặp dịch vụ này đã có trong danh sách cấm." | — | POST combo-restrictions trùng |
+| 409 | `USERNAME_TAKEN` | "Tên đăng nhập đã tồn tại." | — | POST/PATCH therapists |
+| 409 | `ACCOUNT_EXISTS` | "Nhân viên {name} đã có tài khoản đăng nhập rồi." | — | PATCH therapists (cấp `account` cho người đã có) |
+| 409 | `ACCOUNT_MISSING` | "Nhân viên {name} chưa có tài khoản. Hãy cấp tài khoản trước." | — | PATCH therapists (`reset_password` cho người chưa có account) |
+| 409 | `SHIFT_OVERLAP` | "Nhân viên đã có ca trùng khung giờ này." | `{conflicting_shift_id}` | POST shifts |
+| 409 | `NG_PHONE_EXISTS` | "Số điện thoại này đã có trong danh sách chặn." | — | POST ng-list |
+| 422 | `INVALID_STATUS_TRANSITION` | "Không thể chuyển trạng thái này." | `{from, to}` | PATCH booking status; PATCH/cancel booking ở trạng thái kết thúc |
+
 ### 0.3 Xác thực — 3 cơ chế
 
 | Cơ chế | Dùng cho | Cách hoạt động |
@@ -60,12 +77,12 @@
 |---|---|---|
 | 1. Chọn shop & ngày | `GET /shops` · `GET /shops/{id}/services?date=` | services trả `reason: SHOP_CLOSED` cho case A1 |
 | 2. Số người & dịch vụ | (dùng lại data màn 1) | `restricted_course_ids` để disable add-on cấm |
-| 3. Chọn giờ & therapist | `GET /shops/{id}/slots` · `GET /shops/{id}/therapists?date=` | endpoint therapists cho dropdown chỉ định theo tên |
+| 3. Chọn giờ & therapist | `GET /shops/{id}/slots` · `GET /shops/{id}/therapists?date=` · `GET /shops/{id}/timeline?date=` | therapists cho dropdown chỉ định theo tên; timeline vẽ lịch bận theo từng nhân viên |
 | 4. Thông tin & xác nhận | `POST /customers/lookup` · `POST /bookings` | lookup chặn NG ngay khi nhập |
 | 5. Hoàn tất + sửa 2' | `PATCH /bookings/{code}` (X-Edit-Token) | countdown từ `edit_token_expires_in` |
 | 6. Tra cứu / sửa / hủy | `POST /bookings/retrieve` · `PATCH` · `POST .../cancel` | nút theo `can_modify` |
 | 7. Đăng nhập | `POST /auth/login` | chung admin + therapist |
-| 8. Trang Admin | `/admin/*` (3.1 → 3.6) | mỗi tab một cụm CRUD |
+| 8. Trang Admin | `/admin/*` (3.1 → 3.7) | mỗi tab một cụm CRUD; 3.7 xếp người cho nhóm |
 | 9. Trang Therapist | `GET /therapists/me/schedule?date=` | read-only |
 
 ---
@@ -99,14 +116,32 @@
 - **Lỗi:** 400 `VALIDATION_ERROR` (thiếu tham số, party_size >3 → `PARTY_SIZE_EXCEEDED`), 404 `RESOURCE_NOT_FOUND`.
 
 ### 1.3b `GET /shops/{shopId}/therapists?date=` *(bổ sung — wireframe màn 3 cần)*
-- **Mục đích:** danh sách therapist của shop cho dropdown "chỉ định theo tên" (bước 8, chỉ booking 1 người — BR-04). Lọc theo `date`: chỉ trả người **có ca ngày đó** để khách đỡ chọn nhầm người nghỉ.
-- **Response 200:** `[{"id":5,"name":"Tanaka","gender":"female"}]`
-- **Lỗi:** 404 `RESOURCE_NOT_FOUND` (shopId sai), 400 `VALIDATION_ERROR`.
+- **Mục đích:** danh sách therapist của shop cho dropdown "chỉ định theo tên" (bước 8, chỉ booking 1 người — BR-04). Lọc theo `date`: chỉ trả người **có ca ngày đó** để khách đỡ chọn nhầm người nghỉ. `date` là optional — bỏ trống thì trả toàn bộ therapist của shop.
+- **Response 200:** `{"therapists": [{"id":5,"name":"Tanaka","gender":"female"}]}`
+  - Chỉ lộ thông tin khách vốn thấy ở cửa hàng: tên + giới tính. Không SĐT, không tài khoản, không lịch ca.
+- **Lỗi:** 404 `RESOURCE_NOT_FOUND` (shopId sai), 400 `VALIDATION_ERROR` (date sai format).
+
+### 1.3c `GET /shops/{shopId}/timeline?date=` *(bổ sung — wireframe màn 2/3 cần)*
+- **Mục đích:** lịch trong ngày **theo từng nhân viên** để FE vẽ timeline ở bước chọn giờ (hàng trắng = trống, xanh = đã đặt, gạch chéo = ngoài ca). Public, nhưng chỉ lộ những gì khách đứng ở quầy vốn nhìn thấy.
+- **Bảo mật:** KHÔNG bao giờ trả thông tin khách đặt (tên/SĐT/email). Timeline chỉ nói "giờ này ai bận" + tên course, **không** nói "ai đặt". Chỉ nhân viên **có ca** ngày đó mới thành một hàng.
+- **Response 200:**
+```json
+{
+  "date": "2026-07-20",
+  "therapists": [{
+    "id": 5, "name": "Tanaka", "gender": "female",
+    "shifts":   [{"start_time": "10:00", "end_time": "19:00"}],
+    "bookings": [{"start_time": "14:00", "end_time": "15:00", "course_name": "もみほぐし"}]
+  }]
+}
+```
+- Khoảng đã đặt tính theo therapist **được phân công** (BR-21); booking `cancelled` không chiếm chỗ.
+- **Lỗi:** 404 `RESOURCE_NOT_FOUND` (shopId sai), 400 `VALIDATION_ERROR` (thiếu/sai `date`).
 
 ### 1.4 `POST /customers/lookup`
 - **Mục đích:** nhận dạng khách qua SĐT (bước 9 — UC-05) và chặn NG list ngay tại chỗ nhập (UC-06), không để khách đi tiếp rồi mới báo. Dùng POST (không phải GET) để SĐT không lộ trên URL/access log.
 - **Request:** `{"phone": "09012345678"}`
-- **Response 200:** `{"member_type":"member","rank":"Gold","visit_count":12}` — rank chỉ hiển thị (BR-20)
+- **Response 200:** `{"member_type":"member","rank":"Gold","visit_count":12}` — rank chỉ hiển thị (BR-20). Khách chưa có hồ sơ (chưa từng đặt): `{"member_type":"guest","rank":null,"visit_count":0}`.
 - **Lỗi:**
 
 | HTTP | code | message |
@@ -116,7 +151,7 @@
 
 ### 1.5 `POST /bookings` ⭐ handler quan trọng nhất
 - **Mục đích:** tạo booking (bước 11). Toàn bộ BR validate lại tại đây bất kể FE đã chặn — vì AI chatbot sau này không đi qua FE.
-- **Header:** `Idempotency-Key` (uuid, optional) — chống bấm đúp tạo trùng.
+- **Chống bấm đúp (hiện tại):** BE dedup theo **thời gian**, KHÔNG theo header. Trước khi vào transaction, nếu đã có booking của **cùng khách + shop + ngày + giờ** tạo trong **120 giây** gần nhất thì trả lại booking cũ (kèm `edit_token` mới) thay vì tạo bản ghi thứ hai. FE vẫn gửi header `Idempotency-Key` (uuid) nhưng BE **chưa đọc** — xem ghi chú ở quyết định thiết kế #2.
 - **Request:**
 ```json
 {
@@ -152,6 +187,8 @@
 ## 2. Nhóm BOOKING-MANAGE — khách quản lý booking (UC-02, UC-03)
 
 > Xác thực: `booking_code` + `email` trong body. Sai cặp → luôn 404 `BOOKING_NOT_FOUND` (không phân biệt "mã không tồn tại" vs "email sai" — tránh dò mã).
+>
+> **Rate limit:** cả 3 endpoint nhóm này giới hạn **10 request / 60 giây** (chống dò mã bằng brute-force). Vượt hạn → 429.
 
 ### 2.1 `POST /bookings/retrieve`
 - **Mục đích:** tra booking để hiển thị màn quản lý (wireframe màn 6). Trả kèm `can_modify` BE tính sẵn theo deadline 1h (BR-16) — FE chỉ việc ẩn/hiện nút, không tự tính giờ.
@@ -174,12 +211,13 @@
 | 400 | `PARTY_SIZE_EXCEEDED` | sửa lên >3 người |
 | 409 | `SLOT_CONFLICT` | giờ mới vừa bị chiếm — kèm suggested_slots |
 | 422 | `INVALID_COMBO` / `THERAPIST_OFF_SHIFT` | như tạo mới |
+| 422 | `INVALID_STATUS_TRANSITION` | booking đã ở trạng thái kết thúc (cancelled/completed/no_show) — không sửa được |
 
 ### 2.3 `POST /bookings/{bookingCode}/cancel`
 - **Mục đích:** hủy booking (UC-03). Dùng POST thay vì DELETE vì chỉ đổi status → `cancelled` + giải phóng slot, không xóa bản ghi.
 - **Request:** `{"email":"a@b.com"}`
-- **Response 200:** booking với `status: "cancelled"` + gửi email xác nhận hủy.
-- **Lỗi:** 404 `BOOKING_NOT_FOUND`, 422 `MODIFY_DEADLINE_PASSED` (hủy cũng deadline 1h — BR-16).
+- **Response 200:** booking với `status: "cancelled"` + `can_modify: false` + gửi email xác nhận hủy. **Idempotent:** gọi lại trên booking đã hủy vẫn trả 200 (không lỗi).
+- **Lỗi:** 404 `BOOKING_NOT_FOUND`, 422 `MODIFY_DEADLINE_PASSED` (hủy cũng deadline 1h — BR-16), 422 `INVALID_STATUS_TRANSITION` (đã `completed`/`no_show` thì không hủy được).
 
 ---
 
@@ -189,8 +227,22 @@
 
 ### 3.0 `POST /auth/login`
 - **Mục đích:** đăng nhập chung cho admin và therapist (tài khoản therapist do admin cấp).
-- **Request:** `{"username","password"}` → **Response 200:** `{"access_token","role"}`
-- **Lỗi:** 401 `UNAUTHORIZED` — message chung "Thông tin đăng nhập không đúng."
+- **Rate limit:** 5 request / 60 giây.
+- **Request:** `{"username","password"}`
+- **Response 200:**
+```json
+{
+  "access_token": "eyJ...",
+  "role": "therapist",
+  "therapist_id": 5,
+  "username": "tanaka",
+  "display_name": "Tanaka",
+  "expires_in": 28800
+}
+```
+  - `access_token`: JWT HS256, `typ="access"`, TTL 8 giờ. `therapist_id` = null với admin.
+  - `display_name`: tên therapist nếu là tài khoản therapist, ngược lại lấy `username` (admin không gắn với bản ghi therapist nào).
+- **Lỗi:** 401 `UNAUTHORIZED` — message chung "Thông tin đăng nhập không đúng." (cố ý không phân biệt sai username hay password).
 
 ### 3.1 `GET/POST /admin/courses` + `PATCH/DELETE /admin/courses/{id}` (addon tương tự)
 - **Mục đích:** CRUD dịch vụ; bật/tắt `is_active` để dịch vụ biến mất khỏi luồng đặt trong ngày shop thiếu người (US-06).
@@ -201,8 +253,13 @@
 - **Lỗi đặc thù:** 409 khi thêm cặp đã tồn tại — message: "Cặp dịch vụ này đã có trong danh sách cấm."
 
 ### 3.3 `GET/POST/PATCH/DELETE /admin/therapists`
-- **Mục đích:** CRUD therapist. POST nhận optional `account: {username, password}` để cấp tài khoản đăng nhập luôn (đã chốt).
-- **Lỗi đặc thù:** 409 `username` trùng — "Tên đăng nhập đã tồn tại."
+- **Mục đích:** CRUD therapist. POST nhận optional `account: {username, password}` để cấp tài khoản đăng nhập luôn (chung một transaction với insert therapist).
+- **PATCH** phân biệt **hai field tài khoản riêng biệt** (không nhét chung, để không lỡ tay ghi đè mật khẩu người đang dùng):
+  - `account: {username, password}` = **cấp mới** cho người chưa có tài khoản.
+  - `reset_password: "..."` = **đặt lại** mật khẩu cho người đã có (không đá được phiên đang đăng nhập vì JWT không có trạng thái — token cũ sống tới hết 8h TTL).
+  - Gửi cả hai cùng lúc → 400 `VALIDATION_ERROR`. Không đổi được `shop_id` (thuê mới ở shop khác).
+- **GET** trả `has_account` (bool). **DELETE** chặn nếu therapist còn ca hoặc còn reservation → 409 `RESOURCE_IN_USE`.
+- **Lỗi đặc thù:** 409 `USERNAME_TAKEN` (username trùng — "Tên đăng nhập đã tồn tại."), 409 `ACCOUNT_EXISTS` (cấp `account` cho người đã có), 409 `ACCOUNT_MISSING` (`reset_password` cho người chưa có account).
 
 ### 3.4 `GET/POST/DELETE /admin/shifts`
 - **Mục đích:** xếp ca cho therapist — nguồn dữ liệu cho thuật toán slot (BR-05).
@@ -211,9 +268,19 @@
 ### 3.5 `GET/POST/DELETE /admin/ng-list`
 - **Mục đích:** quản lý SĐT bị cấm kèm `reason` (US-07). Reason sẽ hiển thị cho khách khi bị chặn (BR-20).
 
-### 3.6 `GET /admin/bookings?shop_id=&date=&status=` + `PATCH /admin/bookings/{id}/status`
-- **Mục đích:** xem booking của shop (UC-12); cập nhật sau phục vụ. PATCH `{"status":"completed"}` → **trong cùng transaction** +1 `visit_count` của khách (BR-19). `no_show` không cộng.
-- **Lỗi đặc thù:** 422 khi chuyển trạng thái không hợp lệ (vd cancelled → completed) — "Không thể chuyển trạng thái này."
+### 3.6 `GET /admin/bookings?shop_id=&date=&status=&page=&per_page=` + `PATCH /admin/bookings/{id}/status`
+- **Mục đích:** xem booking của shop (UC-12); cập nhật sau phục vụ. `shop_id` bắt buộc; `date`/`status` optional để lọc.
+- **GET Response 200 (có phân trang):** `{"items": [...], "page": 1, "per_page": 50, "total": 123}`. Mỗi item gồm `booking_code`, `status`, `date`, `start_time`, `party_size`, `customer` (phone/email/member_type/rank/visit_count), `course`, và `reservations[]` — mỗi reservation có `therapist_id` + `therapist_name` (BE phân công) và `requested_therapist_name` (khách xin ai) để đối chiếu BR-21, cùng `duration_min` (đã cộng add-on riêng của từng khách).
+- **PATCH** `{"status":"completed"}` → **trong cùng transaction** +1 `visit_count` của khách (BR-19). `no_show` không cộng.
+- **Chuyển trạng thái hợp lệ:** `confirmed`/`pending` → `completed` | `no_show` | `cancelled`. Các trạng thái `cancelled`/`completed`/`no_show` là **kết thúc**, không đi tiếp được.
+- **Lỗi đặc thù:** 422 `INVALID_STATUS_TRANSITION` khi chuyển không hợp lệ (vd cancelled → completed) — "Không thể chuyển trạng thái này." kèm `{from, to}`.
+
+### 3.7 `PATCH /admin/bookings/{bookingId}/reservations/{reservationId}/therapist` *(bổ sung — UC-12 xếp người cho nhóm)*
+- **Mục đích:** admin đổi **người phụ trách** cho MỘT khách trong booking. Nhóm ≥2 không được khách chỉ định (BR-04) nên BE tự phân công lúc tạo — đây là chỗ **duy nhất** sửa lại phân công đó, cũng là cách duy nhất xếp người cho nhóm đông.
+- **Request:** `{"therapist_id": 5}`
+- **Ghi chú BR-21:** chỉ ghi đè `therapist_id` (thực tế ai làm), **không** đụng `requested_therapist_id` (khách đã yêu cầu ai) — giữ để còn đối chiếu.
+- **Response 200:** `{"reservation_id", "guest_no", "therapist_id", "therapist_name"}`
+- **Lỗi:** 404 `RESOURCE_NOT_FOUND` (booking/reservation sai), 422 `INVALID_STATUS_TRANSITION` (booking đã huỷ/đã xong), 422 `VALIDATION_ERROR` (therapist không thuộc shop của đơn), 422 `THERAPIST_OFF_SHIFT` (ca không phủ hết lượt), 409 `SLOT_CONFLICT` (nhân viên đã có lượt khác trùng giờ — kể cả lượt khác trong cùng booking).
 
 ---
 
@@ -222,7 +289,20 @@
 ### 4.1 `GET /therapists/me/schedule?date=`
 - **Mục đích:** therapist xem ca + booking được gán cho mình theo ngày (wireframe màn 9). Read-only.
 - **Bảo mật:** `therapist_id` lấy từ token — **không bao giờ** nhận từ query (tránh xem lịch người khác). SĐT khách che một phần: `090****5678`.
-- **Response 200:** `{"shifts":[{start_time,end_time}], "bookings":[{start_time,duration_min,course_name,customer_phone_masked}]}`
+- **Response 200:**
+```json
+{
+  "date": "2026-07-20",
+  "shifts": [{"start_time": "10:00", "end_time": "19:00"}],
+  "bookings": [{
+    "start_time": "14:00", "duration_min": 75,
+    "course_name": "もみほぐし", "addon_names": ["足つぼ"],
+    "guest_no": 1, "party_size": 2,
+    "customer_phone_masked": "090****5678"
+  }]
+}
+```
+  - `bookings` gồm cả trạng thái `completed` (để therapist xem lại lịch đã phục vụ), ngoài `confirmed`/`pending`; bỏ `cancelled`/`no_show`.
 - **Lỗi:** 401/403 như quy ước nhóm 3.
 
 ---
@@ -230,7 +310,7 @@
 ## 5. Quyết định thiết kế (trả lời khi được hỏi "sao làm vậy?")
 
 1. **Race condition (BR-08):** không tin `GET /slots`; chốt chặn thật là lock trong transaction + re-check. 409 luôn kèm `suggested_slots` để FE xử lý case A6 không cần gọi thêm.
-2. **Idempotency-Key** ở POST /bookings: khách bấm đúp/mạng lag không tạo 2 booking.
+2. **Chống bấm đúp ở POST /bookings:** khách bấm đúp/mạng lag không tạo 2 booking. **Hiện cài đặt bằng dedup theo thời gian** (cùng khách + shop + ngày + giờ trong 120s → trả lại booking cũ), *chưa* đọc header `Idempotency-Key`. Hệ quả: hai request khác nội dung (đổi course/add-on) nhưng cùng khách/shop/giờ trong 120s sẽ bị gộp về booking đầu. Muốn chặt hơn (idempotency đúng theo key duy nhất cho mỗi lần bấm) thì đọc header `Idempotency-Key` và lưu bảng key→booking — **việc còn nợ**.
 3. **Validate 2 tầng:** FE chặn sớm cho UX, BE validate lại toàn bộ — chatbot giai đoạn 2 không đi qua FE.
 4. **Email qua Amazon SES**, gửi sau commit, lỗi thì retry — không rollback booking vì email.
 5. **404 thay vì 403** khi sai mã+email: không tiết lộ mã đặt chỗ nào tồn tại (mã có format đoán được).
@@ -243,9 +323,11 @@
 
 - [ ] Error handler chung: bắt exception → format `{error: {code, message, details}}` (mục 0.1–0.2)
 - [ ] `GET /shops` → `GET /services` → `GET /slots` (nhóm 1 đọc)
+- [ ] `GET /shops/{id}/therapists` + `GET /shops/{id}/timeline` (1.3b, 1.3c — wireframe màn 2/3)
 - [ ] `POST /customers/lookup` (có NG check)
 - [ ] `POST /bookings` (transaction + lock — làm kỹ, viết test từng BR)
-- [ ] `retrieve` / `PATCH` / `cancel` (nhóm 2)
+- [ ] `retrieve` / `PATCH` / `cancel` (nhóm 2, có rate limit)
 - [ ] `POST /auth/login` + decorator `@require_role("admin")`
 - [ ] CRUD admin (3.1 → 3.6) — copy pattern
+- [ ] `PATCH /admin/bookings/{id}/reservations/{rid}/therapist` (3.7 — xếp người cho nhóm)
 - [ ] `GET /therapists/me/schedule`

@@ -38,6 +38,12 @@ export function BookingWizard() {
   // riêng nhưng mọi setter bên dưới luôn xoá cái còn lại.
   const [therapistGender, setTherapistGender] = useState<Gender | null>(null);
   const [therapist, setTherapist] = useState<Therapist | null>(null);
+  // Đích danh (therapist) chọn bằng cách BẤM nhân viên trên timeline. "Không chỉ
+  // định" (noPreference) là lựa chọn CHỦ ĐỘNG, khác trạng thái mặc định "chưa
+  // chọn gì": chưa chọn -> timeline hiện danh sách nhân viên để chọn đích danh;
+  // bấm "Không" -> hiện Giờ trống gộp, shop tự phân người. Cả hai đều gửi BE
+  // rỗng (không id, không gender) nên chỉ khác ở cách hiển thị timeline.
+  const [noPreference, setNoPreference] = useState(false);
   const [startTime, setStartTime] = useState<string | null>(null);
 
   // --- Bước 3
@@ -73,6 +79,7 @@ export function BookingWizard() {
     setGuestAddons(emptyAddons(nextPartySize));
     setTherapistGender(null);
     setTherapist(null);
+    setNoPreference(false);
     setStartTime(null);
   };
 
@@ -109,19 +116,38 @@ export function BookingWizard() {
     if (next >= 2) {
       setTherapistGender(null);
       setTherapist(null);
+      setNoPreference(false);
     }
   };
 
-  /** Chọn giới tính thì bỏ chỉ định đích danh — BE cấm gửi cả hai. */
-  const selectTherapistGender = (next: Gender | null) => {
-    setTherapistGender(next);
+  /**
+   * Chọn giới tính thì bỏ đích danh + "không chỉ định" — chỉ giữ một ý định.
+   * TOGGLE: bấm lại đúng giới tính đang chọn thì bỏ ra, quay về "chưa chọn" để
+   * timeline hiện lại danh sách nhân viên (chọn đích danh).
+   */
+  const selectTherapistGender = (next: Gender) => {
+    setTherapistGender((prev) => (prev === next ? null : next));
+    setTherapist(null);
+    setNoPreference(false);
+    setStartTime(null);
+  };
+
+  /**
+   * Bấm "Không chỉ định": để shop tự phân người, timeline hiện Giờ trống gộp.
+   * TOGGLE: bấm lại khi đang bật thì tắt, quay về danh sách nhân viên.
+   */
+  const selectNoPreference = () => {
+    setNoPreference((prev) => !prev);
+    setTherapistGender(null);
     setTherapist(null);
     setStartTime(null);
   };
 
+  /** Chỉ định đích danh — gọi khi khách bấm slot của một nhân viên trên timeline. */
   const selectTherapist = (next: Therapist | null) => {
     setTherapist(next);
     setTherapistGender(null);
+    setNoPreference(false);
     setStartTime(null);
   };
 
@@ -141,6 +167,7 @@ export function BookingWizard() {
     setGuestAddons(emptyAddons(1));
     setTherapistGender(null);
     setTherapist(null);
+    setNoPreference(false);
     setStartTime(null);
     setPhone("");
     setEmail("");
@@ -188,10 +215,12 @@ export function BookingWizard() {
             guestAddons={guestAddons}
             therapistGender={therapistGender}
             therapist={therapist}
+            noPreference={noPreference}
             startTime={startTime}
             onSelectCourse={selectCourse}
             onChangeGuestAddons={setGuestAddons}
             onSelectTherapistGender={selectTherapistGender}
+            onSelectNoPreference={selectNoPreference}
             onSelectTherapist={selectTherapist}
             onSelectStartTime={setStartTime}
             onSelectDate={browseDate}

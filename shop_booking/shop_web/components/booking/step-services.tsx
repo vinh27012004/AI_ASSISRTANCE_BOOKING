@@ -26,8 +26,7 @@ import { SlotLegend, SlotTimeline } from "./slot-timeline";
 import { StepFooter } from "./step-footer";
 import type { PartySize } from "./booking-wizard";
 
-const GENDER_OPTIONS: Array<{ label: string; value: Gender | null }> = [
-  { label: "Không", value: null },
+const GENDER_OPTIONS: Array<{ label: string; value: Gender }> = [
   { label: "NV nam", value: "male" },
   { label: "NV nữ", value: "female" },
 ];
@@ -93,10 +92,12 @@ export function StepServices({
   guestAddons,
   therapistGender,
   therapist,
+  noPreference,
   startTime,
   onSelectCourse,
   onChangeGuestAddons,
   onSelectTherapistGender,
+  onSelectNoPreference,
   onSelectTherapist,
   onSelectStartTime,
   onSelectDate,
@@ -111,10 +112,13 @@ export function StepServices({
   guestAddons: number[][];
   therapistGender: Gender | null;
   therapist: Therapist | null;
+  noPreference: boolean;
   startTime: string | null;
   onSelectCourse: (id: number) => void;
   onChangeGuestAddons: (next: number[][]) => void;
-  onSelectTherapistGender: (next: Gender | null) => void;
+  onSelectTherapistGender: (next: Gender) => void;
+  onSelectNoPreference: () => void;
+  /** Chỉ định đích danh — gọi khi khách bấm slot của một nhân viên trên timeline. */
   onSelectTherapist: (next: Therapist | null) => void;
   onSelectStartTime: (time: string) => void;
   /** ◀ ▶ trên thanh timeline — đổi ngày ngay tại bước này. */
@@ -141,9 +145,12 @@ export function StepServices({
   );
   const addonUnionKey = addonUnion.join(",");
 
+  // Đích danh giờ lọc phía client (rowFree trên timeline), nên KHÔNG gửi
+  // therapist_id cho GET /slots — luôn lấy giờ nền của mọi nhân viên rồi timeline
+  // tự lọc từng hàng. Chỉ giới tính mới nhờ BE lọc sẵn.
   const slots = useRequest(
     courseId
-      ? `${shop.id}|${date}|${partySize}|${courseId}|${addonUnionKey}|${therapistGender ?? ""}|${therapist?.id ?? ""}`
+      ? `${shop.id}|${date}|${partySize}|${courseId}|${addonUnionKey}|${therapistGender ?? ""}`
       : null,
     // Chỉ chạy khi key khác null, tức courseId chắc chắn đã có.
     (signal) =>
@@ -155,23 +162,17 @@ export function StepServices({
           courseId: courseId!,
           addonIds: addonUnion,
           therapistGender,
-          therapistId: therapist?.id ?? null,
+          therapistId: null,
         },
         signal,
       ),
   );
 
   // Lịch theo từng nhân viên — nguồn dữ liệu của timeline (không phụ thuộc course).
+  // Cũng là danh sách để khách chỉ định đích danh (bấm thẳng vào hàng nhân viên).
   const timeline = useRequest(`tl|${shop.id}|${date}`, (signal) =>
     api.timeline(shop.id, date, signal),
   );
-
-  // BR-04: chỉ hỏi danh sách nhân viên khi đi 1 người — nhóm ≥2 không được chỉ định.
-  const therapists = useRequest(
-    partySize === 1 ? `${shop.id}|${date}` : null,
-    (signal) => api.therapists(shop.id, date, signal),
-  );
-  const therapistList = therapists.data?.therapists ?? [];
 
   const toggleAddon = (guestIndex: number, addonId: number) => {
     const next = guestAddons.map((list, index) => {
@@ -230,6 +231,11 @@ export function StepServices({
   };
 
   const timelineRows = timeline.data?.therapists ?? [];
+
+  // Timeline gộp "Giờ trống" khi: nhóm ≥2 (BR-04), bấm "Không chỉ định", hoặc
+  // chọn giới tính. Mặc định (chưa chọn gì) hiện danh sách nhân viên để khách
+  // chỉ định đích danh bằng cách bấm thẳng vào hàng.
+  const aggregated = partySize >= 2 || noPreference || therapistGender !== null;
 
   return (
     <>
@@ -339,54 +345,36 @@ export function StepServices({
             )}
           </Field>
 
-          {/* BR-04: chỉ booking 1 người mới được chỉ định nhân viên. */}
+          {/* BR-04: chỉ booking 1 người mới được chỉ định nhân viên. Đích danh
+              KHÔNG còn chip ở đây — khách chỉ định bằng cách bấm thẳng slot của
+              nhân viên trên timeline (mục 2). Ở đây chỉ còn "Không / nam / nữ",
+              bấm là chuyển timeline sang Giờ trống gộp. */}
           {partySize === 1 ? (
             <Field label="Chỉ định" hint="Không bắt buộc">
               <div className="flex flex-wrap items-center gap-1.5">
+                <Chip selected={noPreference} onClick={onSelectNoPreference}>
+                  Không
+                </Chip>
                 {GENDER_OPTIONS.map((option) => (
                   <Chip
-                    key={option.label}
-                    // "Không" chỉ sáng khi cũng không chọn đích danh ai.
-                    selected={
-                      therapist === null && therapistGender === option.value
-                    }
+                    key={option.value}
+                    selected={therapistGender === option.value}
                     onClick={() => onSelectTherapistGender(option.value)}
                   >
                     {option.label}
                   </Chip>
                 ))}
-                <span className="text-xs text-ink-3">· đích danh:</span>
-                {therapists.loading ? <LoadingLine label="Đang tải…" /> : null}
-                {therapistList.map((item) => {
-                  const selected = therapist?.id === item.id;
-                  return (
-                    <Chip
-                      key={item.id}
-                      selected={selected}
-                      tone="accent"
-                      // Bấm lại người đang chọn = bỏ chỉ định.
-                      onClick={() => onSelectTherapist(selected ? null : item)}
-                    >
-                      {item.name} ({item.gender === "male" ? "nam" : "nữ"})
-                    </Chip>
-                  );
-                })}
-                {/* Case A4 — không ai có ca ngày này để chỉ định đích danh */}
-                {!therapists.loading &&
-                !therapists.error &&
-                therapistList.length === 0 ? (
-                  <span className="text-xs text-ink-3">
-                    không có nhân viên nhận ca ngày này
+                {therapist ? (
+                  <span className="text-xs text-accent-hover">
+                    · đích danh: <b>{therapist.name}</b> — bấm nhân viên khác trên
+                    lịch để đổi
                   </span>
-                ) : null}
+                ) : (
+                  <span className="text-xs text-ink-3">
+                    · hoặc bấm thẳng nhân viên trên lịch để chỉ định đích danh
+                  </span>
+                )}
               </div>
-              {/* Không chặn luồng: chọn theo giới tính vẫn đặt được bình thường. */}
-              {therapists.error ? (
-                <p className="mt-1.5 text-xs text-ink-3">
-                  Không tải được danh sách nhân viên — bạn vẫn có thể chọn theo
-                  giới tính.
-                </p>
-              ) : null}
             </Field>
           ) : null}
 
@@ -446,7 +434,9 @@ export function StepServices({
       </SectionBar>
 
       <div className="flex flex-wrap items-center gap-2 border-b border-dashed border-line px-4 py-2">
-        <SlotLegend groupMode={partySize >= 2} />
+        {/* Khớp chế độ timeline: gộp "giờ trống" khi nhóm ≥2, "Không chỉ định",
+            hoặc chọn giới tính. Mặc định (chưa chọn) hiện danh sách nhân viên. */}
+        <SlotLegend aggregated={aggregated} />
       </div>
 
       {timeline.loading ? (
@@ -483,15 +473,26 @@ export function StepServices({
           therapists={timelineRows}
           slots={slotList}
           partySize={partySize}
+          aggregated={aggregated}
           hasCourse={Boolean(course) && !slots.loading}
           durationMin={maxDuration}
           courseLabel={course?.name ?? ""}
           selectedTime={startTime}
           selectedTherapistId={pickedTherapistId}
-          requestedTherapistId={therapist?.id ?? null}
           requestedGender={therapistGender}
           onSelect={(time, therapistId) => {
             setPickedTherapistId(therapistId);
+            // Chế độ danh sách: bấm slot của một nhân viên = chỉ định đích danh
+            // người đó. Chế độ Giờ trống gộp trả therapistId = null (shop tự xếp).
+            if (therapistId !== null) {
+              const picked = timelineRows.find((t) => t.id === therapistId);
+              if (picked)
+                onSelectTherapist({
+                  id: picked.id,
+                  name: picked.name,
+                  gender: picked.gender,
+                });
+            }
             onSelectStartTime(time);
           }}
         />

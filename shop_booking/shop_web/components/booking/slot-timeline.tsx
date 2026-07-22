@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { Gender, TimelineTherapist } from "@/lib/types";
 import { minutesToTime, timeToMinutes, toIso, today } from "@/lib/format";
 
@@ -112,15 +112,18 @@ function rowFree(shifts: Range[], busy: Range[], start: number, dur: number): bo
 }
 
 /**
- * Timeline kiểu wireframe 02. Hai chế độ:
+ * Timeline kiểu wireframe 02. Hai chế độ, do bên gọi quyết định qua `aggregated`:
  *
- * - **1 người** — mỗi nhân viên một hàng có tên: khách còn được chỉ định đích
- *   danh nên cần biết ai rảnh giờ nào.
- * - **Nhóm ≥2 người** — GỘP thành một hàng duy nhất, không tên. BR-04 cấm chỉ
- *   định nhân viên cho nhóm, BE tự phân người lúc tạo booking, nên bày tên ra
- *   chỉ khiến khách tưởng mình chọn được. Cái khách cần biết là "khung giờ nào
- *   nhận nổi cả N người" — đúng bằng `slots`, vì `GET /slots` đã tính sẵn theo
- *   `party_size`.
+ * - **Danh sách nhân viên** (`aggregated=false` — mặc định, 1 người chưa chọn
+ *   "Không/nam/nữ") — mỗi nhân viên một hàng có tên: ca làm, giờ đã kín (chỉ hiện
+ *   màu "đã đặt", không lộ course của khách khác), và slot bấm được. MỌI hàng đều
+ *   bấm được: bấm slot của ai = chỉ định ĐÍCH DANH người đó (`onSelect` trả kèm
+ *   `therapistId`). Đây là cách duy nhất để chỉ định đích danh.
+ * - **Gộp "giờ trống"** (`aggregated=true` — nhóm ≥2, bấm "Không chỉ định", hoặc
+ *   chọn giới tính) — GỘP thành một hàng duy nhất, không tên. Khách không nhắm ai
+ *   cụ thể nên chỉ cần "khung giờ nào còn nhận" — đúng bằng `slots` (`GET /slots`
+ *   đã lọc theo `party_size` + giới tính). `onSelect` trả `therapistId = null`,
+ *   shop tự phân người. Nhóm thì BR-04 cấm chỉ định.
  */
 export function SlotTimeline({
   date,
@@ -132,27 +135,30 @@ export function SlotTimeline({
   courseLabel,
   selectedTime,
   selectedTherapistId,
-  requestedTherapistId,
+  aggregated,
   requestedGender,
   onSelect,
 }: {
   date: string;
   therapists: TimelineTherapist[];
-  /** Giờ bắt đầu hợp lệ từ GET /slots — đã lọc theo course/số người/chỉ định. */
+  /** Giờ bắt đầu hợp lệ từ GET /slots — đã lọc theo course/số người/giới tính. */
   slots: string[];
   partySize: number;
+  /** Do bên gọi quyết định: true = gộp "Giờ trống"; false = danh sách nhân viên. */
+  aggregated: boolean;
   hasCourse: boolean;
   durationMin: number;
   courseLabel: string;
   selectedTime: string | null;
   /** Hàng khách đã bấm — chỉ để vẽ ô "lượt của bạn" đúng hàng. */
   selectedTherapistId: number | null;
-  requestedTherapistId: number | null;
   requestedGender: Gender | null;
-  /** `therapistId` là null ở chế độ nhóm — lúc đó không có hàng nào để ghim. */
+  /** `therapistId` khác null = khách bấm đúng hàng một nhân viên (chỉ định đích
+   *  danh); null = chế độ gộp, shop tự xếp. */
   onSelect: (time: string, therapistId: number | null) => void;
 }) {
   const groupMode = partySize >= 2;
+  const aggregatedMode = aggregated;
   const nowMinutes = useNowMinutes(date);
   const [scrollRef, frameWidth] = useElementWidth<HTMLDivElement>();
 
@@ -166,16 +172,24 @@ export function SlotTimeline({
     [therapists],
   );
 
+  // Nhóm nhân viên khớp với chỉ định — để chế độ gộp tính "giờ trống" theo đúng
+  // nhóm khách nhắm tới: chọn giới tính -> theo giới, không chỉ định -> tất cả.
+  const relevantRows = useMemo(() => {
+    if (requestedGender !== null)
+      return rows.filter((r) => r.gender === requestedGender);
+    return rows;
+  }, [rows, requestedGender]);
+
   const slotMinutes = useMemo(
     () => slots.map(timeToMinutes).sort((a, b) => a - b),
     [slots],
   );
 
-  // Chế độ nhóm không vẽ ca từng người nữa, nhưng vẫn phải cho thấy khung giờ
-  // cửa hàng có người trực — hợp của mọi ca trong ngày.
+  // Chế độ gộp không vẽ ca từng người, nhưng vẫn phải cho thấy khung giờ có người
+  // trực — hợp các ca của đúng nhóm nhân viên đang nhắm tới (khớp giới tính).
   const serviceRanges = useMemo(
-    () => mergeRanges(rows.flatMap((r) => r.shiftRanges)),
-    [rows],
+    () => mergeRanges(relevantRows.flatMap((r) => r.shiftRanges)),
+    [relevantRows],
   );
 
   const axis = useMemo(() => {
@@ -213,17 +227,10 @@ export function SlotTimeline({
 
   const selectedStart = selectedTime ? timeToMinutes(selectedTime) : null;
 
-  /** Hàng được phép bấm theo chỉ định hiện tại (đích danh / giới tính). */
-  const clickable = useCallback(
-    (row: { id: number; gender: Gender }) => {
-      if (requestedTherapistId !== null) return row.id === requestedTherapistId;
-      if (requestedGender !== null) return row.gender === requestedGender;
-      return true;
-    },
-    [requestedTherapistId, requestedGender],
-  );
-
-  // Chọn giờ từ nơi khác (gợi ý 409) thì chưa biết hàng — vẽ lên hàng trống đầu tiên.
+  // Ở chế độ danh sách MỌI nhân viên đều bấm được (chỉ định đích danh = bấm hàng
+  // ai thì ra người đó), nên không còn lọc "hàng nào bấm được" nữa. Chỉ cần suy
+  // ra hàng để vẽ ô "lượt của bạn": ưu tiên hàng khách vừa bấm, còn giờ đến từ
+  // nơi khác (gợi ý 409) thì rơi về hàng đầu tiên còn rảnh.
   const selectedRowId = useMemo(() => {
     if (selectedStart === null) return null;
     if (
@@ -237,13 +244,23 @@ export function SlotTimeline({
       return selectedTherapistId;
     }
     return (
-      rows.find(
-        (r) =>
-          clickable(r) &&
-          rowFree(r.shiftRanges, r.busyRanges, selectedStart, durationMin),
+      rows.find((r) =>
+        rowFree(r.shiftRanges, r.busyRanges, selectedStart, durationMin),
       )?.id ?? null
     );
-  }, [rows, selectedStart, selectedTherapistId, durationMin, clickable]);
+  }, [rows, selectedStart, selectedTherapistId, durationMin]);
+
+  // Nhãn hàng gộp đổi theo bối cảnh: nhóm shop tự xếp, hay 1 người theo giới tính
+  // / bất kỳ ai rảnh.
+  const aggregateTitle = groupMode ? "Cả nhóm" : "Giờ trống";
+  const aggregateSub = groupMode
+    ? `${partySize} người · shop tự xếp`
+    : requestedGender === "male"
+      ? "NV nam · shop tự xếp"
+      : requestedGender === "female"
+        ? "NV nữ · shop tự xếp"
+        : "shop tự xếp";
+  const aggregateSlotNote = groupMode ? `nhận được ${partySize} người` : "còn nhận";
 
   if (rows.length === 0) return null;
 
@@ -297,7 +314,7 @@ export function SlotTimeline({
         </div>
 
         <div className="relative">
-          {groupMode ? (
+          {aggregatedMode ? (
             <div className="flex">
               <span
                 className="sticky left-0 z-10 shrink-0 border-r border-line-strong px-1.5 py-0.5 text-[11px] leading-tight text-ink"
@@ -307,11 +324,9 @@ export function SlotTimeline({
                   background: "var(--tl-corner)",
                 }}
               >
-                ◯ Cả nhóm
+                ◯ {aggregateTitle}
                 <br />
-                <span className="text-[9.5px] text-ink-3">
-                  {partySize} người · shop tự xếp
-                </span>
+                <span className="text-[9.5px] text-ink-3">{aggregateSub}</span>
               </span>
 
               <div
@@ -352,8 +367,8 @@ export function SlotTimeline({
                         type="button"
                         onClick={() => onSelect(minutesToTime(t), null)}
                         aria-pressed={selectedStart === t}
-                        aria-label={`${minutesToTime(t)} — nhận được ${partySize} người`}
-                        title={`${minutesToTime(t)} – ${minutesToTime(t + durationMin)} · nhận được ${partySize} người`}
+                        aria-label={`${minutesToTime(t)} — ${aggregateSlotNote}`}
+                        title={`${minutesToTime(t)} – ${minutesToTime(t + durationMin)} · ${aggregateSlotNote}`}
                         className="absolute inset-y-0.5 z-10 rounded-[3px] border border-dashed border-line-strong transition-colors hover:border-solid hover:border-accent hover:bg-accent-soft"
                         style={{
                           left: left(t),
@@ -371,15 +386,14 @@ export function SlotTimeline({
                       width: durationMin * axis.pxPerMin,
                     }}
                   >
-                    {courseLabel} {durationMin}p × {partySize}
+                    {courseLabel} {durationMin}p{groupMode ? ` × ${partySize}` : ""}
                   </span>
                 ) : null}
               </div>
             </div>
           ) : null}
 
-          {groupMode ? null : rows.map((row) => {
-            const rowClickable = clickable(row);
+          {aggregatedMode ? null : rows.map((row) => {
             // Khoảng NGOÀI CA = phần bù của các ca trong trục — vẽ gạch chéo.
             const offShift = gapsIn(
               mergeRanges(row.shiftRanges),
@@ -437,7 +451,7 @@ export function SlotTimeline({
                   ))}
 
            
-                  {hasCourse && rowClickable
+                  {hasCourse
                     ? slotMinutes
                         .filter((t) =>
                           rowFree(row.shiftRanges, row.busyRanges, t, durationMin),
@@ -462,14 +476,16 @@ export function SlotTimeline({
                     : null}
 
         
+                  {/* Lịch của khách khác — chỉ hiện màu "đã đặt", KHÔNG lộ course
+                      họ đặt (không cần cho việc chọn giờ, và kín đáo hơn). */}
                   {row.busyRanges.map((r, i) => (
                     <span
                       key={`busy-${r.start}`}
                       className="absolute inset-y-0 z-20 overflow-hidden rounded-[3px] border border-accent bg-accent-soft px-1 py-0.5 text-[8.5px] leading-tight text-accent-hover"
                       style={{ left: left(r.start), width: (r.end - r.start) * axis.pxPerMin }}
-                      title={`${row.bookings[i].course_name} · ${row.bookings[i].start_time}–${row.bookings[i].end_time}`}
+                      title={`Đã đặt · ${row.bookings[i].start_time}–${row.bookings[i].end_time}`}
                     >
-                      {row.bookings[i].course_name} {r.end - r.start}p
+                      Đã đặt
                     </span>
                   ))}
 
@@ -511,30 +527,31 @@ export function SlotTimeline({
 
 /**
  * Chú giải — luôn kèm chữ, không bắt khách nhớ màu (đúng wireframe). Phải đi
- * đúng bộ với chế độ của timeline: chế độ nhóm không vẽ block "đã đặt" của
- * người khác nên không được liệt kê nó ra.
+ * đúng bộ với chế độ của timeline: chế độ gộp (nhóm / chỉ định theo giới tính /
+ * không chỉ định) không vẽ block "đã đặt" của người khác nên không liệt kê nó
+ * ra; chỗ kín hiện là ô trắng "hết chỗ".
  */
-export function SlotLegend({ groupMode }: { groupMode?: boolean }) {
+export function SlotLegend({ aggregated }: { aggregated?: boolean }) {
   return (
     <div className="flex flex-wrap items-center gap-1.5 text-xs text-ink-3">
       <span className="shrink-0">Chú giải:</span>
       <span className="rounded-[3px] border border-dashed border-line-strong bg-surface px-2 py-0.5 text-ink-2">
         Trống — đặt được
       </span>
-      {groupMode ? (
+      {aggregated ? (
         <span className="rounded-[3px] border border-line-strong bg-surface px-2 py-0.5 text-ink-3">
-          Để trắng — kín chỗ cho nhóm
+          Để trắng — kín chỗ
         </span>
       ) : (
         <span className="rounded-[3px] border border-accent bg-accent-soft px-2 py-0.5 text-accent-hover">
-          ■ Đã đặt (kèm tên course)
+          ■ Đã đặt
         </span>
       )}
       <span
         className="rounded-[3px] border border-line-strong px-2 py-0.5 text-ink-2"
         style={{ background: "var(--fill)" }}
       >
-        ▨ {groupMode ? "Ngoài giờ phục vụ" : "Ngoài ca / khoá"}
+        ▨ {aggregated ? "Ngoài giờ phục vụ" : "Ngoài ca / khoá"}
       </span>
       <span className="rounded-[3px] border border-dashed border-white bg-accent px-2 py-0.5 text-white">
         ◼ Lượt bạn đang chọn
