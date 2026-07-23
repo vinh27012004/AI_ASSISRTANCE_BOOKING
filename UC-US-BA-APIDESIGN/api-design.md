@@ -42,6 +42,8 @@
 | 422 | `THERAPIST_OFF_SHIFT` | BR-05 | "Nhân viên {therapist_name} không làm việc trong khung giờ này. Bạn có thể đổi giờ khác hoặc bỏ chỉ định." | `{therapist_id}` |
 | 422 | `MODIFY_DEADLINE_PASSED` | BR-16 | "Đã quá thời hạn thay đổi online (trước giờ hẹn 1 tiếng). Vui lòng gọi trực tiếp cửa hàng." | `{shop_phone}` |
 | 422 | `SHOP_CHANGE_NOT_ALLOWED` | BR-18 | "Không thể đổi cửa hàng online. Vui lòng liên hệ cửa hàng để được hỗ trợ." | `{shop_phone}` |
+| 429 | `RATE_LIMITED` | — | "Bạn thao tác quá nhanh, vui lòng thử lại sau giây lát." | `{retry_after}` |
+| 401 | `CHANNEL_UNAUTHORIZED` | — | "Kênh gọi API không được xác thực." (server-to-server, chatbot GĐ2 — §7) | — |
 | 500 | `INTERNAL_ERROR` | BR-12 | "Hệ thống đang gặp sự cố tạm thời. Vui lòng thử lại sau ít phút." | — |
 
 > Lưu ý i18n: khách cuối là người Nhật — khi làm thật, `message` sẽ dịch sang tiếng Nhật hoặc trả message-key cho FE dịch. Giai đoạn dev dùng tiếng Việt cho dễ debug.
@@ -70,6 +72,7 @@
 | Public | Luồng đặt chỗ (nhóm 1) | Không cần gì |
 | `booking_code` + `email` | Khách quản lý booking (nhóm 2) | Gửi trong body, BE so khớp cặp (BR-15). Riêng sửa nhanh: header `X-Edit-Token` (JWT TTL 2 phút, BE cấp lúc tạo — BR-17) |
 | JWT Bearer | Admin / Therapist (nhóm 3, 4) | `POST /auth/login` → token chứa `role`, `therapist_id?`. Therapist do admin cấp tài khoản |
+| API key kênh (`X-Api-Key`) | Kênh chatbot GĐ2 — **mọi** request | Middleware đối chiếu hash trong `channel_api_key`, rate-limit riêng theo key. Thiếu/sai → 401 `CHANNEL_UNAUTHORIZED`, vượt hạn → 429 `RATE_LIMITED`. Luồng đặt chỗ vẫn public cho FE web (§7.2) |
 
 ### 0.4 Map màn wireframe ↔ API (thứ tự làm theo lát cắt dọc)
 
@@ -151,7 +154,7 @@
 
 ### 1.5 `POST /bookings` ⭐ handler quan trọng nhất
 - **Mục đích:** tạo booking (bước 11). Toàn bộ BR validate lại tại đây bất kể FE đã chặn — vì AI chatbot sau này không đi qua FE.
-- **Chống bấm đúp (hiện tại):** BE dedup theo **thời gian**, KHÔNG theo header. Trước khi vào transaction, nếu đã có booking của **cùng khách + shop + ngày + giờ** tạo trong **120 giây** gần nhất thì trả lại booking cũ (kèm `edit_token` mới) thay vì tạo bản ghi thứ hai. FE vẫn gửi header `Idempotency-Key` (uuid) nhưng BE **chưa đọc** — xem ghi chú ở quyết định thiết kế #2.
+- **Chống bấm đúp — hai lớp (GĐ2):** (1) **Idempotency-Key** — nếu request có header và key đã tồn tại trong bảng `idempotency_key` thì trả lại đúng booking đã map (không tạo mới); chatbot đặt `Idempotency-Key = conversation_id`. (2) **Dedup thời gian** (lớp cũ, chạy khi *không* có key) — cùng **khách + shop + ngày + giờ** trong **120 giây** gần nhất thì trả lại booking cũ kèm `edit_token` mới. Chi tiết §7.1; bối cảnh ở quyết định thiết kế #2.
 - **Request:**
 ```json
 {
@@ -163,6 +166,7 @@
 }
 ```
 - **Thứ tự xử lý trong handler (giữ đúng thứ tự — lỗi rẻ check trước, transaction sau cùng):**
+  0. **Idempotency pre-check (GĐ2):** có `Idempotency-Key` và key đã có trong `idempotency_key` → trả luôn booking đã map (200 `BookingCreated`, cấp `edit_token` mới), bỏ qua các bước dưới (§7.1)
   1. Validate format (400 `VALIDATION_ERROR`)
   2. party_size 1–3 và khớp len(reservations) (400 `PARTY_SIZE_EXCEEDED`)
   3. Nhóm ≥2 → không được chỉ định therapist (400 `THERAPIST_NOT_ALLOWED`)
@@ -170,7 +174,7 @@
   5. Combo không nằm trong combo_restriction (422 `INVALID_COMBO`)
   6. Phone không trong ng_list (403 `PHONE_BLOCKED`)
   7. Therapist chỉ định có shift phủ giờ (422 `THERAPIST_OFF_SHIFT`)
-  8. **Transaction:** lock slot/therapist (`SELECT ... FOR UPDATE`) → re-check đủ chỗ → không đủ: rollback + 409 `SLOT_CONFLICT` kèm `suggested_slots` → đủ: upsert customer, insert booking (confirmed) + reservations + reservation_addon → sinh `booking_code` = `{yyyyMMdd}-{shop_code}-{random 4-6 ký tự}` → commit
+  8. **Transaction:** lock slot/therapist (`SELECT ... FOR UPDATE`) → re-check đủ chỗ → không đủ: rollback + 409 `SLOT_CONFLICT` kèm `suggested_slots` → đủ: upsert customer, insert booking (confirmed) + reservations + reservation_addon → sinh `booking_code` = `{yyyyMMdd}-{shop_code}-{random 4-6 ký tự}` → (GĐ2) nếu request có `Idempotency-Key`: lưu `idempotency_key→booking` **trong cùng transaction** → commit
   9. Gửi email SES (async/sau commit — lỗi email không rollback)
 - **Response 201:**
 ```json
@@ -310,7 +314,7 @@
 ## 5. Quyết định thiết kế (trả lời khi được hỏi "sao làm vậy?")
 
 1. **Race condition (BR-08):** không tin `GET /slots`; chốt chặn thật là lock trong transaction + re-check. 409 luôn kèm `suggested_slots` để FE xử lý case A6 không cần gọi thêm.
-2. **Chống bấm đúp ở POST /bookings:** khách bấm đúp/mạng lag không tạo 2 booking. **Hiện cài đặt bằng dedup theo thời gian** (cùng khách + shop + ngày + giờ trong 120s → trả lại booking cũ), *chưa* đọc header `Idempotency-Key`. Hệ quả: hai request khác nội dung (đổi course/add-on) nhưng cùng khách/shop/giờ trong 120s sẽ bị gộp về booking đầu. Muốn chặt hơn (idempotency đúng theo key duy nhất cho mỗi lần bấm) thì đọc header `Idempotency-Key` và lưu bảng key→booking — **việc còn nợ**.
+2. **Chống bấm đúp ở POST /bookings:** khách bấm đúp/mạng lag không tạo 2 booking. **GĐ1** dùng dedup theo thời gian (cùng khách + shop + ngày + giờ trong 120s → trả lại booking cũ) — hạn chế: hai request **khác nội dung** (đổi course/add-on) cùng khách/shop/giờ trong 120s bị gộp về booking đầu. **GĐ2 (đã chốt — DD_chatbot Q1):** BE đọc header `Idempotency-Key` + lưu bảng `idempotency_key→booking`, phân biệt chính xác từng lần "đặt" (chatbot dùng `conversation_id`); dedup thời gian giữ làm lớp fallback cho FE web. Chi tiết §7.1.
 3. **Validate 2 tầng:** FE chặn sớm cho UX, BE validate lại toàn bộ — chatbot giai đoạn 2 không đi qua FE.
 4. **Email qua Amazon SES**, gửi sau commit, lỗi thì retry — không rollback booking vì email.
 5. **404 thay vì 403** khi sai mã+email: không tiết lộ mã đặt chỗ nào tồn tại (mã có format đoán được).
@@ -331,3 +335,40 @@
 - [ ] CRUD admin (3.1 → 3.6) — copy pattern
 - [ ] `PATCH /admin/bookings/{id}/reservations/{rid}/therapist` (3.7 — xếp người cho nhóm)
 - [ ] `GET /therapists/me/schedule`
+- [ ] **(GĐ2)** Đọc `Idempotency-Key` ở `POST /bookings` + bảng `idempotency_key` — §7.1
+- [ ] **(GĐ2)** Middleware API key kênh + rate limit (`channel_api_key`) — §7.2
+
+---
+
+## 7. Giai đoạn 2 — thay đổi BE cho kênh chatbot (đã chốt: DD_chatbot Q1, Q2)
+
+> Chatbot là client thứ hai của bộ API (US-09). Ngoài việc dùng lại **toàn bộ** endpoint GĐ1, nó đòi **2 thay đổi phía BE** dưới đây. Cả hai độc lập logic booking — chỉ thêm bảng + middleware. Tham chiếu: `detail-design/DD_chatbot.md` Mục 7.0.
+
+### 7.1 Đọc `Idempotency-Key` ở `POST /bookings` (Q1 — BR-08)
+
+- **Vì sao:** dedup theo thời gian (QĐ#2) không phân biệt được "gửi lại y hệt" với "đổi nội dung cùng giờ trong 120s" → gộp nhầm. Chatbot (code tự retry) dễ dính hơn người bấm nút.
+- **Bảng `idempotency_key`:** `idem_key` (unique) → `booking_id`, kèm `request_hash` (SHA-256 payload) để phát hiện tái dùng key với nội dung khác, và `created_at` để cron dọn.
+- **Hành vi handler** (bước 0 + lưu ở bước 8):
+  - Có header `Idempotency-Key`:
+    - key **đã tồn tại** + `request_hash` **khớp** → **200** `BookingCreated` (booking đã map, cấp `edit_token` mới), **không** tạo mới.
+    - key đã tồn tại + `request_hash` **lệch** → **422** `VALIDATION_ERROR` `{fields:{"Idempotency-Key":"key đã dùng cho đơn khác"}}` — chống tái dùng nhầm.
+    - key **chưa có** → tạo booking như thường, lưu `idempotency_key→booking` **trong cùng transaction** (bước 8) rồi commit.
+  - **Không** header → chạy lớp dedup thời gian 120s cũ (fallback, cho FE web).
+- **Key chatbot dùng:** `conversation_id`. Một hội thoại → một lần tạo booking → một key. Nếu bot cho đặt nhiều đơn trong một hội thoại thì đổi thành `conversation_id + "#" + số-đơn`.
+- **Dọn key:** cron xóa bản ghi `created_at` cũ hơn ~24h (quá cửa sổ retry hợp lý). Không ảnh hưởng booking (FK `ON DELETE CASCADE` là từ booking → key, không ngược).
+
+### 7.2 Middleware API key + rate limit cho kênh chatbot (Q2)
+
+- **Vì sao:** luồng đặt chỗ vốn public; khi có chatbot gọi tự động cần (a) nhận diện request đến từ kênh chatbot (tách log/metrics), (b) chặn lạm dụng riêng cho kênh.
+- **Bảng `channel_api_key`:** `key_hash` (unique, **không lưu key thô**), `key_prefix` (nhận diện/log), `rate_limit_per_min`, `is_active`, `last_used_at`.
+- **Middleware (`before_request`):**
+  1. Không có header `X-Api-Key` → coi là kênh public (FE web) → xử lý như GĐ1.
+  2. Có `X-Api-Key`: hash → tra `channel_api_key`. Không khớp / `is_active=false` → **401 `CHANNEL_UNAUTHORIZED`**.
+  3. Khớp → đếm request theo key trong cửa sổ 60s (Redis). Vượt `rate_limit_per_min` → **429 `RATE_LIMITED`** kèm `details.retry_after`. Cập nhật `last_used_at`.
+- **Độc lập** rate-limit nhóm 2 (10/60s) và login (5/60s) — ba bộ đếm khác nhau.
+- **Cấp key:** thao tác admin/ops (ngoài luồng khách). MVP seed 1 key cho `chatbot-web`; endpoint quản trị key (xoay tự phục vụ) làm sau nếu cần.
+
+### 7.3 Ghi chú OpenAPI
+
+- `securitySchemes.channelApiKey` (apiKey header `X-Api-Key`). `POST /bookings` khai `security: [{}, {channelApiKey: []}]` = **public HOẶC** key kênh. Các endpoint public khác cùng nguyên tắc, do middleware quyết — không lặp `security` per-path cho gọn.
+- Mã lỗi mới trong enum `Error`: `RATE_LIMITED` (429), `CHANNEL_UNAUTHORIZED` (401).

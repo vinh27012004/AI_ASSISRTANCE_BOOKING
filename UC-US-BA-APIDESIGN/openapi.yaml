@@ -1,0 +1,711 @@
+openapi: 3.0.3
+info:
+  title: Booking API — Hệ thống booking massage りらくる
+  description: |
+    BE cung cấp API cho FE web (và AI chatbot ở giai đoạn 2).
+    Mã lỗi map với Business Rules — xem api-design.md.
+  version: 0.1.0
+servers:
+  - url: /api/v1
+
+tags:
+  - name: booking-flow
+    description: Luồng đặt chỗ (public — UC-01, UC-04)
+  - name: booking-manage
+    description: Khách quản lý booking (UC-02, UC-03 — xác thực email + mã)
+  - name: auth
+    description: Đăng nhập nội bộ
+  - name: admin
+    description: Trang admin (UC-08 → UC-12, role=admin)
+  - name: therapist
+    description: Trang therapist (UC-11, role=therapist)
+
+paths:
+  # ---------- 1. Luồng đặt chỗ ----------
+  /shops:
+    get:
+      tags: [booking-flow]
+      summary: Danh sách cửa hàng (bước 1)
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Shop" }
+
+  /shops/{shopId}/services:
+    get:
+      tags: [booking-flow]
+      summary: Dịch vụ khả dụng theo ngày (bước 4–5, case A1)
+      parameters:
+        - { name: shopId, in: path, required: true, schema: { type: integer } }
+        - { name: date, in: query, required: true, schema: { type: string, format: date } }
+        - { name: party_size, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 3 } }
+      responses:
+        "200":
+          description: Rỗng + reason=SHOP_CLOSED nếu ngày đó không phục vụ (A1)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  courses:
+                    type: array
+                    items: { $ref: "#/components/schemas/Course" }
+                  addons:
+                    type: array
+                    items: { $ref: "#/components/schemas/Addon" }
+                  reason:
+                    type: string
+                    nullable: true
+                    enum: [SHOP_CLOSED, null]
+
+  /shops/{shopId}/slots:
+    get:
+      tags: [booking-flow]
+      summary: Tra slot khả dụng (bước 6 — UC-04, BR-07). Chỉ mang tính hiển thị, BE re-check lúc tạo (BR-08)
+      parameters:
+        - { name: shopId, in: path, required: true, schema: { type: integer } }
+        - { name: date, in: query, required: true, schema: { type: string, format: date } }
+        - { name: party_size, in: query, required: true, schema: { type: integer, minimum: 1, maximum: 3 } }
+        - { name: course_id, in: query, required: true, schema: { type: integer } }
+        - { name: addon_ids, in: query, required: false, style: form, explode: false,
+            schema: { type: array, items: { type: integer } } }
+        - { name: therapist_id, in: query, required: false, schema: { type: integer },
+            description: Chỉ booking 1 người (BR-04); loại trừ với therapist_gender }
+        - { name: therapist_gender, in: query, required: false,
+            schema: { $ref: "#/components/schemas/Gender" } }
+      responses:
+        "200":
+          description: Rỗng = hết slot (case A2)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  slots:
+                    type: array
+                    items: { type: string, example: "14:00" }
+
+  /shops/{shopId}/therapists:
+    get:
+      tags: [booking-flow]
+      summary: Danh sách therapist cho dropdown chỉ định theo tên (màn 3, chỉ booking 1 người — BR-04)
+      parameters:
+        - { name: shopId, in: path, required: true, schema: { type: integer } }
+        - { name: date, in: query, required: false, schema: { type: string, format: date },
+            description: Lọc người có ca ngày đó }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id: { type: integer }
+                    name: { type: string }
+                    gender: { $ref: "#/components/schemas/Gender" }
+
+  /customers/lookup:
+    post:
+      tags: [booking-flow]
+      summary: Nhận dạng khách qua SĐT (bước 9 — UC-05, UC-06). Dùng POST để SĐT không lộ trên URL/log
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phone]
+              properties:
+                phone: { type: string, example: "09012345678" }
+      responses:
+        "200":
+          description: Thông tin thành viên (rank chỉ hiển thị — BR-20)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CustomerInfo" }
+        "403":
+          description: SĐT trong NG list (BR-06), details.reason có lý do cấm (BR-20)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /bookings:
+    post:
+      tags: [booking-flow]
+      summary: Tạo booking (bước 11 — UC-01). Transaction + lock slot (BR-08, BR-12)
+      security:
+        - {}
+        - channelApiKey: []
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema: { type: string, maxLength: 64 }
+          description: |
+            BE đọc key + lưu bảng idempotency_key→booking (GĐ2, api-design §7.1):
+            gửi lại cùng key trả về đúng booking đã tạo (200), không tạo bản ghi thứ hai.
+            Chatbot dùng conversation_id; FE web có thể dùng uuid. Xem QĐ#2.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BookingCreateRequest" }
+      responses:
+        "200":
+          description: |
+            Idempotent replay — Idempotency-Key đã dùng, trả lại booking đã tạo trước đó
+            (kèm edit_token mới). Không tạo bản ghi thứ hai (api-design §7.1, QĐ#2).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BookingCreated" }
+        "201":
+          description: Tạo thành công — mã đặt chỗ gửi kèm email qua SES (BR-15)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BookingCreated" }
+        "400":
+          description: PARTY_SIZE_EXCEEDED (BR-14) / ADDON_WITHOUT_COURSE (BR-01) / THERAPIST_NOT_ALLOWED (BR-04)
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "403":
+          description: PHONE_BLOCKED (BR-06)
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "409":
+          description: SLOT_CONFLICT (BR-08) — details.suggested_slots gợi ý 3 giờ gần nhất (case A6)
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "422":
+          description: INVALID_COMBO (BR-09) / THERAPIST_OFF_SHIFT (BR-05)
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "500":
+          description: INTERNAL_ERROR (BR-12) — khách thử lại
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  /bookings/{bookingCode}:
+    patch:
+      tags: [booking-manage]
+      summary: |
+        Sửa booking (UC-02, BR-18). Hai cách xác thực:
+        (1) header X-Edit-Token — sửa nhanh trong 2 phút sau khi tạo (BR-17);
+        (2) body.email khớp — qua trang quản lý booking (BR-15).
+      security:
+        - editToken: []
+        - {}
+      parameters:
+        - { name: bookingCode, in: path, required: true, schema: { type: string, example: "20260720-S001-A1B2" } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BookingUpdateRequest" }
+      responses:
+        "200":
+          description: Đã cập nhật — email xác nhận thay đổi
+          content: { application/json: { schema: { $ref: "#/components/schemas/Booking" } } }
+        "401":
+          description: EDIT_TOKEN_EXPIRED (BR-17) — FE hướng sang trang quản lý booking
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "404":
+          description: BOOKING_NOT_FOUND — mã + email không khớp (không tiết lộ mã tồn tại hay không)
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "409":
+          description: SLOT_CONFLICT (BR-08)
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "422":
+          description: MODIFY_DEADLINE_PASSED (BR-16) / SHOP_CHANGE_NOT_ALLOWED (BR-18) / INVALID_COMBO / THERAPIST_OFF_SHIFT
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  /bookings/retrieve:
+    post:
+      tags: [booking-manage]
+      summary: Tra booking bằng mã + email (BR-15). Dùng POST để email/mã không lộ trên URL
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [booking_code, email]
+              properties:
+                booking_code: { type: string }
+                email: { type: string, format: email }
+      responses:
+        "200":
+          description: Kèm can_modify để FE ẩn/hiện nút sửa (BR-16)
+          content: { application/json: { schema: { $ref: "#/components/schemas/Booking" } } }
+        "404":
+          description: BOOKING_NOT_FOUND
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  /bookings/{bookingCode}/cancel:
+    post:
+      tags: [booking-manage]
+      summary: Hủy booking (UC-03). POST thay vì DELETE vì chỉ đổi trạng thái, không xóa bản ghi
+      parameters:
+        - { name: bookingCode, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string, format: email }
+      responses:
+        "200":
+          description: Đã hủy, slot được giải phóng — email xác nhận
+          content: { application/json: { schema: { $ref: "#/components/schemas/Booking" } } }
+        "404":
+          description: BOOKING_NOT_FOUND
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "422":
+          description: MODIFY_DEADLINE_PASSED (BR-16)
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  # ---------- 2. Auth ----------
+  /auth/login:
+    post:
+      tags: [auth]
+      summary: Đăng nhập admin / therapist (tài khoản therapist do admin cấp)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username: { type: string }
+                password: { type: string, format: password }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  access_token: { type: string }
+                  role: { type: string, enum: [admin, therapist] }
+        "401":
+          description: Sai thông tin (trả lỗi chung, không nói rõ sai user hay password)
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  # ---------- 3. Admin ----------
+  /admin/courses:
+    get:
+      tags: [admin]
+      summary: Danh sách course theo shop
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: shop_id, in: query, required: true, schema: { type: integer } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Course" } }
+    post:
+      tags: [admin]
+      summary: Tạo course (US-06)
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CourseInput" }
+      responses:
+        "201":
+          description: Created
+          content: { application/json: { schema: { $ref: "#/components/schemas/Course" } } }
+
+  /admin/courses/{id}:
+    patch:
+      tags: [admin]
+      summary: Sửa course / bật tắt is_active theo ngày
+      security: [{ bearerAuth: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CourseInput" }
+      responses:
+        "200": { description: OK }
+    delete:
+      tags: [admin]
+      summary: Xóa course
+      security: [{ bearerAuth: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      responses:
+        "204": { description: Deleted }
+
+  /admin/combo-restrictions:
+    get:
+      tags: [admin]
+      summary: Danh sách cặp course+addon bị cấm (BR-09 — data seed sau, bảng rỗng = mọi combo hợp lệ)
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/ComboRestriction" } }
+    post:
+      tags: [admin]
+      summary: Thêm cặp cấm
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ComboRestriction" }
+      responses:
+        "201": { description: Created }
+
+  /admin/therapists:
+    post:
+      tags: [admin]
+      summary: Tạo therapist, tùy chọn cấp kèm tài khoản đăng nhập (đã chốt)
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [shop_id, name, gender]
+              properties:
+                shop_id: { type: integer }
+                name: { type: string }
+                gender: { $ref: "#/components/schemas/Gender" }
+                account:
+                  type: object
+                  nullable: true
+                  description: Cấp tài khoản cho therapist
+                  properties:
+                    username: { type: string }
+                    password: { type: string, format: password }
+      responses:
+        "201": { description: Created }
+
+  /admin/shifts:
+    post:
+      tags: [admin]
+      summary: Xếp ca làm việc cho therapist
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [therapist_id, work_date, start_time, end_time]
+              properties:
+                therapist_id: { type: integer }
+                work_date: { type: string, format: date }
+                start_time: { type: string, example: "10:00" }
+                end_time: { type: string, example: "18:00" }
+      responses:
+        "201": { description: Created }
+
+  /admin/ng-list:
+    get:
+      tags: [admin]
+      summary: Danh sách SĐT bị cấm kèm lý do (US-07, BR-20)
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/NgEntry" } }
+    post:
+      tags: [admin]
+      summary: Thêm SĐT vào NG list
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NgEntry" }
+      responses:
+        "201": { description: Created }
+
+  /admin/bookings:
+    get:
+      tags: [admin]
+      summary: Xem danh sách booking của shop (UC-12)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: shop_id, in: query, required: true, schema: { type: integer } }
+        - { name: date, in: query, required: false, schema: { type: string, format: date } }
+        - { name: status, in: query, required: false, schema: { $ref: "#/components/schemas/BookingStatus" } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Booking" } }
+
+  /admin/bookings/{id}/status:
+    patch:
+      tags: [admin]
+      summary: Cập nhật trạng thái sau phục vụ — completed thì tự động +1 visit_count trong transaction (BR-19)
+      security: [{ bearerAuth: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [completed, no_show] }
+      responses:
+        "200": { description: OK }
+
+  # ---------- 4. Therapist ----------
+  /therapists/me/schedule:
+    get:
+      tags: [therapist]
+      summary: Lịch ca + booking của chính mình (UC-11) — therapist_id lấy từ token, không nhận từ client
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: date, in: query, required: true, schema: { type: string, format: date } }
+      responses:
+        "200":
+          description: SĐT khách được che một phần
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  shifts:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        start_time: { type: string, example: "10:00" }
+                        end_time: { type: string, example: "18:00" }
+                  bookings:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        start_time: { type: string, example: "14:00" }
+                        duration_min: { type: integer, example: 75 }
+                        course_name: { type: string }
+                        customer_phone_masked: { type: string, example: "090****5678" }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+    editToken:
+      type: apiKey
+      in: header
+      name: X-Edit-Token
+      description: JWT ngắn hạn {booking_id, exp +120s} — BE cấp lúc tạo booking (BR-17)
+    channelApiKey:
+      type: apiKey
+      in: header
+      name: X-Api-Key
+      description: |
+        Xác thực kênh client GĐ2 (chatbot — api-design §7.2). Middleware đối chiếu hash trong
+        bảng channel_api_key, rate-limit riêng theo key. Thiếu/sai → 401 CHANNEL_UNAUTHORIZED,
+        vượt hạn → 429 RATE_LIMITED. Luồng đặt chỗ vẫn public cho FE web (security: [{}]).
+
+  schemas:
+    Gender:
+      type: string
+      enum: [male, female]
+
+    BookingStatus:
+      type: string
+      enum: [pending, confirmed, cancelled, completed, no_show]
+
+    Shop:
+      type: object
+      properties:
+        id: { type: integer }
+        shop_code: { type: string, example: "S001" }
+        name: { type: string }
+        address: { type: string }
+        phone: { type: string }
+
+    Course:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string, example: "もみほぐし" }
+        duration_min: { type: integer, example: 60, description: Bội số 15 phút (BR-02) }
+        price: { type: integer, example: 3980, description: JPY }
+
+    Addon:
+      allOf:
+        - $ref: "#/components/schemas/Course"
+        - type: object
+          properties:
+            restricted_course_ids:
+              type: array
+              items: { type: integer }
+              description: Các course không được ghép (từ combo_restriction — BR-09, FE chặn sớm)
+
+    CourseInput:
+      type: object
+      required: [shop_id, name, duration_min, price]
+      properties:
+        shop_id: { type: integer }
+        name: { type: string }
+        duration_min: { type: integer, multipleOf: 15 }
+        price: { type: integer }
+        is_active: { type: boolean, default: true }
+
+    ComboRestriction:
+      type: object
+      required: [course_id, addon_id]
+      properties:
+        course_id: { type: integer }
+        addon_id: { type: integer }
+
+    NgEntry:
+      type: object
+      required: [phone]
+      properties:
+        phone: { type: string }
+        reason: { type: string, nullable: true, description: Có hiển thị cho khách (BR-20) }
+
+    CustomerInfo:
+      type: object
+      properties:
+        member_type: { type: string, enum: [member, guest] }
+        rank: { type: string, nullable: true, description: Chỉ để hiển thị (BR-20) }
+        visit_count: { type: integer }
+
+    ReservationInput:
+      type: object
+      properties:
+        addon_ids:
+          type: array
+          items: { type: integer }
+          description: Add-on riêng từng người (BR-10)
+
+    BookingCreateRequest:
+      type: object
+      required: [shop_id, date, start_time, party_size, phone, email, course_id, reservations]
+      properties:
+        shop_id: { type: integer }
+        date: { type: string, format: date }
+        start_time: { type: string, example: "14:00" }
+        party_size:
+          type: integer
+          minimum: 1
+          maximum: 3
+          description: Tối đa 3 (BR-14), phải khớp độ dài reservations[]
+        phone: { type: string, description: Tra thành viên / NG list (BR-06) }
+        email: { type: string, format: email, description: Xác thực + nhận mã (BR-15) }
+        course_id: { type: integer, description: Cả nhóm cùng course (BR-10) }
+        reservations:
+          type: array
+          minItems: 1
+          maxItems: 3
+          items: { $ref: "#/components/schemas/ReservationInput" }
+        therapist_id:
+          type: integer
+          nullable: true
+          description: Chỉ booking 1 người (BR-04); loại trừ với therapist_gender
+        therapist_gender:
+          allOf: [{ $ref: "#/components/schemas/Gender" }]
+          nullable: true
+
+    BookingUpdateRequest:
+      type: object
+      description: Chỉ đổi được ngày/giờ, dịch vụ, số người ≤3 (BR-18). Không có shop_id — đổi shop trả 422
+      properties:
+        email: { type: string, format: email, description: Bắt buộc nếu không dùng X-Edit-Token }
+        date: { type: string, format: date }
+        start_time: { type: string }
+        party_size: { type: integer, minimum: 1, maximum: 3 }
+        course_id: { type: integer }
+        reservations:
+          type: array
+          maxItems: 3
+          items: { $ref: "#/components/schemas/ReservationInput" }
+        therapist_id: { type: integer, nullable: true }
+        therapist_gender:
+          allOf: [{ $ref: "#/components/schemas/Gender" }]
+          nullable: true
+
+    Booking:
+      type: object
+      properties:
+        booking_code: { type: string, example: "20260720-S001-A1B2" }
+        status: { $ref: "#/components/schemas/BookingStatus" }
+        shop: { $ref: "#/components/schemas/Shop" }
+        date: { type: string, format: date }
+        start_time: { type: string }
+        party_size: { type: integer }
+        course: { $ref: "#/components/schemas/Course" }
+        reservations:
+          type: array
+          items:
+            type: object
+            properties:
+              guest_no: { type: integer }
+              addons:
+                type: array
+                items: { $ref: "#/components/schemas/Course" }
+        therapist_name: { type: string, nullable: true }
+        can_modify:
+          type: boolean
+          description: BE tính sẵn theo deadline 1h (BR-16) để FE ẩn/hiện nút
+
+    BookingCreated:
+      allOf:
+        - $ref: "#/components/schemas/Booking"
+        - type: object
+          properties:
+            edit_token:
+              type: string
+              description: Token sửa nhanh, hiệu lực 2 phút (BR-17)
+            edit_token_expires_in:
+              type: integer
+              example: 120
+
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+              enum:
+                - PARTY_SIZE_EXCEEDED
+                - ADDON_WITHOUT_COURSE
+                - THERAPIST_NOT_ALLOWED
+                - PHONE_BLOCKED
+                - BOOKING_NOT_FOUND
+                - SLOT_CONFLICT
+                - INVALID_COMBO
+                - THERAPIST_OFF_SHIFT
+                - MODIFY_DEADLINE_PASSED
+                - SHOP_CHANGE_NOT_ALLOWED
+                - EDIT_TOKEN_EXPIRED
+                - RATE_LIMITED
+                - CHANNEL_UNAUTHORIZED
+                - INTERNAL_ERROR
+            message: { type: string }
+            details:
+              type: object
+              nullable: true
+              description: "VD: SLOT_CONFLICT kèm suggested_slots[], PHONE_BLOCKED kèm reason"

@@ -158,6 +158,35 @@ CREATE TABLE reservation_addon (
 );
 
 -- =====================================================
+-- Giai đoạn 2 — kênh chatbot (DD_chatbot Q1, Q2; api-design §7).
+-- Độc lập luồng nghiệp vụ GĐ1: chỉ THÊM bảng, không sửa bảng cũ.
+-- =====================================================
+
+-- Idempotency cho POST /bookings (Q1, BR-08 / api-design QĐ#2):
+-- key duy nhất mỗi lần "đặt" -> booking đã tạo. Chatbot dùng conversation_id.
+CREATE TABLE idempotency_key (
+    id           INT AUTO_INCREMENT PRIMARY KEY,
+    idem_key     VARCHAR(64)  NOT NULL UNIQUE COMMENT 'Header Idempotency-Key (chatbot: conversation_id)',
+    booking_id   INT          NOT NULL,
+    request_hash CHAR(64)     NULL COMMENT 'SHA-256 payload — phát hiện tái dùng key với nội dung khác',
+    created_at   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Cron dọn key cũ hơn ~24h',
+    FOREIGN KEY (booking_id) REFERENCES booking(id) ON DELETE CASCADE
+);
+
+-- API key xác thực kênh client GĐ2 (Q2) — header X-Api-Key.
+-- Chỉ lưu HASH của key (không lưu thô); rate-limit riêng theo từng key.
+CREATE TABLE channel_api_key (
+    id                 INT AUTO_INCREMENT PRIMARY KEY,
+    name               VARCHAR(100) NOT NULL COMMENT 'Tên kênh, vd "chatbot-web"',
+    key_hash           VARCHAR(255) NOT NULL UNIQUE COMMENT 'Hash của API key (không lưu key thô)',
+    key_prefix         VARCHAR(12)  NOT NULL COMMENT 'Vài ký tự đầu để nhận diện trong log (không bí mật)',
+    rate_limit_per_min INT          NOT NULL DEFAULT 60 COMMENT 'Hạn mức request/phút riêng cho kênh này',
+    is_active          BOOLEAN      NOT NULL DEFAULT TRUE,
+    created_at         DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_used_at       DATETIME     NULL
+);
+
+-- =====================================================
 -- Các Business Rule KHÔNG thể enforce bằng schema,
 -- phải xử lý ở tầng application:
 --   BR-03: một therapist chỉ phục vụ 1 khách tại 1 thời điểm

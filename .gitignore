@@ -55,3 +55,6 @@ desktop.ini
 
 # --- Node (phòng khi có tooling ở gốc; shop_web tự lo phần của nó) ---
 node_modules/
+
+# --- Các file tạm khác ---
+.claude/
