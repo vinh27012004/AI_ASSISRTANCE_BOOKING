@@ -1,0 +1,11 @@
+# Chatbot service GĐ2 — client của shop_api (chatbot-architecture.md §0/§8: service riêng).
+#
+# LÕI chạy bằng stdlib thuần (state machine, PII, session in-memory, NLU/NLG fake, HTTP
+# qua urllib) → unit-test bước ③④⑤ KHÔNG cần cài gì (mẹo test §9). Các adapter thật bên
+# dưới bật lên khi cấu hình env — cài thêm khi lên staging/prod.
+
+Flask>=3.0            # web layer /chat/message (đồng bộ stack với shop_api)
+
+# --- Adapter production (tùy chọn; lõi không phụ thuộc) ---
+# redis>=5.0          # RedisSessionStore (Q5) — mặc định dev dùng in-memory
+# httpx>=0.27         # thay urllib nếu muốn connection pool/async

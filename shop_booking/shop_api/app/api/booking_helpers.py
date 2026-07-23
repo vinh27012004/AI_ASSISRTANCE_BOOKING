@@ -1,5 +1,7 @@
 from dataclasses import dataclass
 from datetime import datetime, date, time, timedelta, timezone
+import hashlib
+import json
 import os
 import random
 import re
@@ -333,6 +335,14 @@ def get_slots_logic(shop_id, query_date, party_size, course_id, addon_ids, thera
             available_slots.append(minutes_to_str(t_min))
 
     return available_slots
+
+
+def hash_booking_request(data: dict) -> str:
+    """SHA-256 (hex, 64 ký tự) của payload POST /bookings — dùng cho Idempotency-Key
+    (api-design §7.1). `sort_keys` để thứ tự field không đổi hash; cùng nội dung → cùng
+    hash dù client sắp xếp khác. Lệch hash = tái dùng key cho đơn khác → 422."""
+    canonical = json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def generate_booking_code(shop_code: str, query_date: date) -> str:

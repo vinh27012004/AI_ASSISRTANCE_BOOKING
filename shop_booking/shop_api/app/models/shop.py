@@ -353,3 +353,73 @@ class Reservation(db.Model):
     addons: Mapped[list[Addon]] = relationship(
         secondary=reservation_addon, back_populates="reservations"
     )
+
+
+# =====================================================
+# Giai đoạn 2 — kênh chatbot (DD_chatbot Q1, Q2; api-design §7).
+# Độc lập luồng nghiệp vụ GĐ1: CHỈ THÊM bảng, không đụng bảng cũ.
+# =====================================================
+
+
+class IdempotencyKey(db.Model):
+    """Chống tạo booking trùng cho client tự retry (chatbot) — Q1 / api-design §7.1.
+
+    Dedup theo thời gian 120s (lớp cũ) không phân biệt được "gửi lại y hệt" với "đổi
+    nội dung cùng giờ trong 120s". Ở đây một `idem_key` (chatbot dùng `conversation_id`)
+    map cứng về đúng một booking; `request_hash` bắt trường hợp tái dùng key cho payload
+    khác → 422. FK ON DELETE CASCADE là từ booking → key (xóa booking thì key rụng theo),
+    KHÔNG ngược lại — cron dọn key cũ không được đụng booking.
+    """
+
+    __tablename__ = "idempotency_key"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    idem_key: Mapped[str] = mapped_column(
+        sa.String(64),
+        unique=True,
+        comment="Header Idempotency-Key (chatbot: conversation_id)",
+    )
+    booking_id: Mapped[int] = mapped_column(
+        ForeignKey("booking.id", ondelete="CASCADE")
+    )
+    request_hash: Mapped[str | None] = mapped_column(
+        sa.String(64),
+        comment="SHA-256 payload — phát hiện tái dùng key với nội dung khác",
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        server_default=sa.func.now(), comment="Cron dọn key cũ hơn ~24h"
+    )
+
+    booking: Mapped[Booking] = relationship()
+
+
+class ChannelApiKey(db.Model):
+    """Xác thực kênh client GĐ2 (chatbot) qua header `X-Api-Key` — Q2 / api-design §7.2.
+
+    Chỉ lưu HASH của key (không lưu key thô); rate-limit riêng theo từng key, độc lập
+    rate-limit nhóm BOOKING-MANAGE (10/60s) và login (5/60s).
+    """
+
+    __tablename__ = "channel_api_key"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(
+        sa.String(100), comment='Tên kênh, vd "chatbot-web"'
+    )
+    key_hash: Mapped[str] = mapped_column(
+        sa.String(255),
+        unique=True,
+        comment="Hash của API key (không lưu key thô)",
+    )
+    key_prefix: Mapped[str] = mapped_column(
+        sa.String(12),
+        comment="Vài ký tự đầu để nhận diện trong log (không bí mật)",
+    )
+    rate_limit_per_min: Mapped[int] = mapped_column(
+        default=60,
+        server_default=sa.text("60"),
+        comment="Hạn mức request/phút riêng cho kênh này",
+    )
+    is_active: Mapped[bool] = mapped_column(default=True, server_default=sa.true())
+    created_at: Mapped[datetime] = mapped_column(server_default=sa.func.now())
+    last_used_at: Mapped[datetime | None] = mapped_column()
