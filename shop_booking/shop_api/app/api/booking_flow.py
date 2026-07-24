@@ -14,7 +14,6 @@ from app.models.shop import (
     TimeSlot,
     Booking,
     Reservation,
-    IdempotencyKey,
     combo_restriction,
     Gender,
     MemberType,
@@ -33,7 +32,6 @@ from app.api.booking_helpers import (
     generate_booking_code,
     format_booking_response,
     validate_booking_request,
-    hash_booking_request,
 )
 
 
@@ -357,24 +355,6 @@ def lookup_customer():
 def create_booking():
     data = request.get_json() or {}
 
-    # Bước 0 — Idempotency-Key (GĐ2, api-design §7.1). Chatbot đặt key = conversation_id.
-    # Pre-check rẻ: key đã map booking rồi thì trả lại luôn, khỏi validate + transaction.
-    # (Chốt chặn race song song nằm trong transaction bên dưới — sau khi giữ lock.)
-    idem_key = request.headers.get("Idempotency-Key")
-    idem_hash = None
-    if idem_key:
-        idem_hash = hash_booking_request(data)
-        existing = IdempotencyKey.query.filter_by(idem_key=idem_key).first()
-        if existing:
-            if existing.request_hash == idem_hash:
-                # Gửi lại y hệt → trả booking đã tạo, cấp edit_token mới (không tạo mới).
-                return format_booking_response(existing.booking, include_edit_token=True), 200
-            # Cùng key nhưng payload khác → tái dùng nhầm, chặn để không map lẫn đơn.
-            raise APIError(
-                422, "VALIDATION_ERROR", "Dữ liệu không hợp lệ, vui lòng kiểm tra lại.",
-                {"fields": {"Idempotency-Key": "key đã dùng cho đơn khác"}},
-            )
-
     # Bước 1–7 (format, BR-14, BR-04, course/addon, BR-09, BR-06, BR-05) dùng chung
     # với PATCH /bookings/{code} để hai đường không bao giờ lệch luật — xem mục 2.2.
     v = validate_booking_request(data, check_ng_list=True)
@@ -394,40 +374,24 @@ def create_booking():
     therapist_gender = v.therapist_gender
 
 
-    # Dedup theo thời gian 120s — lớp CŨ, chỉ chạy khi KHÔNG có Idempotency-Key (fallback
-    # cho FE web, §7.1). Có key thì đã xử lý chính xác hơn ở bước 0 nên bỏ lớp này để
-    # không gộp nhầm "đổi course/add-on cùng giờ trong 120s" về đơn đầu.
-    if not idem_key:
-        customer_temp = Customer.query.filter_by(phone=phone).first()
-        if customer_temp:
-            recent_booking = Booking.query.filter_by(
-                shop_id=shop_id,
-                customer_id=customer_temp.id,
-                booking_date=query_date,
-                start_time=time(start_time_min // 60, start_time_min % 60)
-            ).order_by(Booking.created_at.desc()).first()
+    # Chống bấm đúp: cùng khách + shop + ngày + giờ trong 120 giây gần nhất -> trả lại
+    # booking cũ thay vì tạo mới (quyết định thiết kế #2).
+    customer_temp = Customer.query.filter_by(phone=phone).first()
+    if customer_temp:
+        recent_booking = Booking.query.filter_by(
+            shop_id=shop_id,
+            customer_id=customer_temp.id,
+            booking_date=query_date,
+            start_time=time(start_time_min // 60, start_time_min % 60)
+        ).order_by(Booking.created_at.desc()).first()
 
-            if recent_booking and (datetime.now() - recent_booking.created_at).total_seconds() < 120:
-                return format_booking_response(recent_booking, include_edit_token=True)
+        if recent_booking and (datetime.now() - recent_booking.created_at).total_seconds() < 120:
+            return format_booking_response(recent_booking, include_edit_token=True)
 
     # 8. Transaction + lock slot/therapist
     try:
         # Lock therapists of this shop to prevent race conditions
         db.session.query(Therapist).filter(Therapist.shop_id == shop_id).with_for_update().all()
-
-        # Re-check Idempotency-Key TRONG transaction, sau khi đã giữ lock (lock này
-        # serialize mọi POST /bookings cùng shop → thấy được bản ghi mà request song
-        # song vừa commit). Chống 2 request cùng key chạy chồng nhau tạo 2 booking.
-        if idem_key:
-            existing = IdempotencyKey.query.filter_by(idem_key=idem_key).first()
-            if existing:
-                db.session.rollback()
-                if existing.request_hash == idem_hash:
-                    return format_booking_response(existing.booking, include_edit_token=True), 200
-                raise APIError(
-                    422, "VALIDATION_ERROR", "Dữ liệu không hợp lệ, vui lòng kiểm tra lại.",
-                    {"fields": {"Idempotency-Key": "key đã dùng cho đơn khác"}},
-                )
 
         shifts_by_therapist, busy_by_therapist, therapist_map = prefetch_avail_data(shop_id, query_date)
 
@@ -559,15 +523,6 @@ def create_booking():
         slot = TimeSlot.query.filter_by(shop_id=shop_id, slot_date=query_date, start_time=slot_time).first()
         if slot:
             slot.status = SlotStatus.AVAILABLE if any_avail else SlotStatus.BOOKED
-
-        # GĐ2 (§7.1): map idem_key -> booking TRONG cùng transaction. Retry cùng key sau
-        # này trả đúng booking này; UNIQUE(idem_key) là chốt chặn cuối nếu lọt race.
-        if idem_key:
-            db.session.add(IdempotencyKey(
-                idem_key=idem_key,
-                booking_id=booking.id,
-                request_hash=idem_hash,
-            ))
 
         db.session.commit()
     except Exception as e:

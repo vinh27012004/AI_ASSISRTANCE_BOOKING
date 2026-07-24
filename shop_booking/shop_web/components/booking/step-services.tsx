@@ -18,6 +18,8 @@ import {
   addMinutesToTime,
   formatDateShortVi,
   formatYen,
+  hhmmToMinutes,
+  nowMinutes,
   parseIso,
   toIso,
   today,
@@ -219,11 +221,18 @@ export function StepServices({
     }));
   }, [courses]);
 
-  const slotList = slots.data?.slots ?? [];
+  const isToday = date === toIso(today());
+  // Đặt cho HÔM NAY thì bỏ các giờ đã trôi qua — không cho chọn lùi về quá khứ.
+  // (BE vẫn là chốt chặn; đây chỉ là chặn sớm cho UX — validate hai tầng.)
+  const slotList = useMemo(() => {
+    const raw = slots.data?.slots ?? [];
+    if (!isToday) return raw;
+    const cutoff = nowMinutes();
+    return raw.filter((t) => hhmmToMinutes(t) > cutoff);
+  }, [slots.data, isToday]);
   const noSlots =
     Boolean(courseId) && !slots.loading && !slots.error && slotList.length === 0;
 
-  const isToday = date === toIso(today());
   const shiftDate = (delta: number) => {
     const next = parseIso(date);
     next.setDate(next.getDate() + delta);

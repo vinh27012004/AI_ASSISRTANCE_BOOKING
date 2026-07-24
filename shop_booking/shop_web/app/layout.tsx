@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Itim, Geist_Mono } from "next/font/google";
 import "./globals.css";
+import { ChatWidget } from "@/components/chat/chat-widget";
 
 // Wireframe dùng Itim (viết tay, có tiếng Việt) — Itim chỉ có weight 400.
 const itim = Itim({
@@ -29,7 +30,11 @@ export default function RootLayout({
       lang="vi"
       className={`${itim.variable} ${geistMono.variable} h-full antialiased`}
     >
-      <body className="min-h-full flex flex-col font-sans">{children}</body>
+      <body className="min-h-full flex flex-col font-sans">
+        {children}
+        {/* Widget chat AI — tự ẩn ở khu admin/therapist/login (chỉ dành cho khách) */}
+        <ChatWidget />
+      </body>
     </html>
   );
 }

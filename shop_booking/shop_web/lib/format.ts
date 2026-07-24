@@ -24,6 +24,18 @@ export function today(): Date {
   return new Date(now.getFullYear(), now.getMonth(), now.getDate());
 }
 
+/** Số phút đã trôi trong ngày hôm nay (giờ địa phương) — để lọc các slot đã qua. */
+export function nowMinutes(): number {
+  const now = new Date();
+  return now.getHours() * 60 + now.getMinutes();
+}
+
+/** "HH:MM" -> số phút tính từ 00:00. */
+export function hhmmToMinutes(hhmm: string): number {
+  const [h, m] = hhmm.split(":").map(Number);
+  return h * 60 + m;
+}
+
 /** Cột của một ngày trong lưới T2→CN. */
 export function mondayIndex(date: Date): number {
   return (date.getDay() + 6) % 7;

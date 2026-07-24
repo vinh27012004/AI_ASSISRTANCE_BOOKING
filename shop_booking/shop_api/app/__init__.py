@@ -71,7 +71,4 @@ def create_app() -> Flask:
     from app import api
     api.init_app(app)
 
-    from app import cli  # CLI ops: cấp/thu hồi API key kênh chatbot (GĐ2)
-    cli.init_app(app)
-
     return app

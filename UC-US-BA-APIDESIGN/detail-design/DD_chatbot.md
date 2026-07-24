@@ -4,6 +4,8 @@
 > Mọi khẳng định nghiệp vụ dưới đây trích số hiệu; luật đổi thì chỉ cập nhật số hiệu.
 > **Quy ước quan trọng:** chatbot là **client** của `shop_api` (giống FE), **không** chứa business logic. BE vẫn là chốt chặn cuối (validate 2 tầng — `api-design.md` quyết định #3). DD này mô tả *client* đó, không định nghĩa lại luật của BE.
 
+> ⚠️ **CẬP NHẬT (mentor) — 2 thay đổi BE ở Mục 7.0 ĐÃ BỎ.** Q1 (`Idempotency-Key` + bảng `idempotency_key`) và Q2 (API key kênh `X-Api-Key` + bảng `channel_api_key`) **không còn**. Chatbot gọi API GĐ1 như **client public** (giống FE web) — **không thay đổi gì** ở `shop_api`. Chống bấm đúp do BE tự lo bằng **dedup thời gian 120s**. Mọi chỗ nhắc `X-Api-Key` / `Idempotency-Key` / hai bảng đó bên dưới coi như **không còn hiệu lực** (giữ lại để đọc lịch sử quyết định).
+
 ---
 
 ## 1. Tổng quan & phạm vi
@@ -25,8 +27,8 @@ Service gồm các **sub-module** (mỗi cái ánh xạ 1 đơn vị code triể
 | `pii_masker` | `pii_masker.py` + Vault | Che SĐT/email/mã đặt chỗ trước khi ra LLM (§6) | §6 |
 | `session_store` | Redis client | Mỗi `conversation_id`: state, slots, vault, lịch sử | §2 |
 | `api_client` | `shop_api_client.py` | Gọi các endpoint giai đoạn 1 (§4). **Chỉ code gọi, LLM không gọi** | §2, §4 |
-| *(BE thay đổi ①)* | middleware trong `shop_api` | API key kênh (`X-Api-Key`) + rate limit — Mục 7.0-Q2 | §8 |
-| *(BE thay đổi ②)* | handler `POST /bookings` | Đọc `Idempotency-Key` + bảng `key→booking` — Mục 7.0-Q1 | api-design QĐ#2 |
+| ~~*(BE thay đổi ①)*~~ | — | **ĐÃ BỎ** (API key kênh) — chatbot gọi API public | — |
+| ~~*(BE thay đổi ②)*~~ | — | **ĐÃ BỎ** (Idempotency-Key) — dùng dedup 120s của BE | — |
 
 ### 1.2 UC/US phủ
 
@@ -44,7 +46,7 @@ Chatbot dùng **đúng 3 cơ chế như FE**, cộng một lớp kênh mới:
 | Luồng đặt chỗ (shops/services/slots/therapists/lookup/POST bookings) | **Public** |
 | Sửa nhanh ≤2 phút sau khi tạo trong phiên | header `X-Edit-Token` (JWT TTL 2 phút — BR-17) |
 | Sửa/hủy sau đó | `booking_code` + `email` trong body (BR-15) |
-| **Toàn bộ request từ kênh chatbot** | **+ API key kênh**: header `X-Api-Key`, BE đối chiếu bảng `channel_api_key` (đã chốt — Mục 7.0-Q2) |
+| ~~Toàn bộ request từ kênh chatbot~~ | ~~+ API key kênh `X-Api-Key`~~ — **ĐÃ BỎ**, gọi public như FE web |
 
 ### 1.4 Endpoint/hàm public module chịu trách nhiệm
 
@@ -86,7 +88,7 @@ Tất cả trích thẳng `openapi.yaml`/`api-design.md`; **không** định ngh
 | `SLOT` | `GET /shops/{shopId}/slots?date=&party_size=&course_id=&addon_ids=&therapist_id=&therapist_gender=` | query (openapi L65–90) | `{slots: ["14:00", …]}` | rỗng = A2. **Chỉ hiển thị**, BE re-check lúc tạo (BR-08) |
 | `THERAPIST` | `GET /shops/{shopId}/therapists?date=` | query | `[{id, name, gender}]` | **chỉ khi `party_size==1`** (BR-04). Chỉ lộ tên+giới tính |
 | `CONTACT` | `POST /customers/lookup` | `{phone}` | `CustomerInfo{member_type, rank, visit_count}` | chặn NG tại chỗ (BR-06) → 403 `PHONE_BLOCKED` |
-| `CREATE` | `POST /bookings` | `BookingCreateRequest` (openapi L581) | `BookingCreated{…, edit_token, edit_token_expires_in}` | header `Idempotency-Key=conversation_id` — BE sẽ đọc key (đã chốt — Mục 7.0-Q1) |
+| `CREATE` | `POST /bookings` | `BookingCreateRequest` (openapi L581) | `BookingCreated{…, edit_token, edit_token_expires_in}` | gọi public; ~~Idempotency-Key~~ **đã bỏ** — BE dedup 120s chống bấm đúp |
 | sửa trong phiên | `PATCH /bookings/{bookingCode}` | `BookingUpdateRequest` + header `X-Edit-Token` | `Booking` | edit_token còn hạn 2 phút (BR-17) |
 | hủy trong phiên | `POST /bookings/{bookingCode}/cancel` | `{email}` | `Booking{status:"cancelled"}` | idempotent (api-design 2.3) |
 | tra lại | `POST /bookings/retrieve` | `{booking_code, email}` | `Booking{…, can_modify}` | dùng khi edit_token hết hạn |
@@ -343,8 +345,8 @@ Nhánh sửa/hủy (UC-02/03) ngoài A1–A8:
 
 | # | Vấn đề | Quyết định | Kéo theo (việc phải làm) |
 |---|---|---|---|
-| **Q1** | Chống tạo booking trùng — BE hiện chỉ dedup theo thời gian 120s, chưa đọc header (`api-design.md` QĐ#2) | **BE bổ sung đọc `Idempotency-Key`** + bảng `key→booking`; chatbot dùng `conversation_id` làm key | Xử lý được cả case retry lẫn case **đổi nội dung cùng giờ trong 120s** (dedup thời gian không phân biệt được). Migration bảng key + sửa handler `POST /bookings`. **Đây là thay đổi BE thứ 2** |
-| **Q2** | Auth kênh chatbot → `shop_api` (§8) | **API key tĩnh (hash)**: header `X-Api-Key`, bảng `channel_api_key(key_hash, name, rate_limit, active)`, rate-limit theo key | 401 khi thiếu/sai key, 429 khi vượt hạn — **độc lập** rate-limit nhóm 2 (10/60s) và login (5/60s). Cần spec + migration BE |
+| ~~**Q1**~~ **(ĐÃ BỎ)** | Chống tạo booking trùng | ❌ **Không** thêm `Idempotency-Key`/bảng nữa (mentor: chatbot gọi API bình thường) | Dùng **dedup thời gian 120s** sẵn có của BE. Chấp nhận hạn chế: 2 request đổi nội dung cùng giờ trong 120s bị gộp — hiếm với luồng chatbot có xác nhận |
+| ~~**Q2**~~ **(ĐÃ BỎ)** | Auth kênh chatbot → `shop_api` | ❌ **Không** thêm API key kênh (mentor: chatbot gọi API như client public) | Bỏ bảng `channel_api_key` + middleware + mã lỗi `CHANNEL_UNAUTHORIZED`. Luồng đặt chỗ vốn public — chatbot dùng chung |
 | **Q3** | Interface `/chat/message` (§2.1) | **Request/response đơn giản**, không streaming: `{conversation_id, text, lang} → {conversation_id, reply_text, state, ui.buttons[], done}` | Đủ MVP, gắn nút dễ. Nâng lên SSE sau **không phá** schema (chỉ đổi content-type). Cần thêm vào `openapi.yaml` |
 | **Q4** | Cách trích entity NLU (§11.4) | **Tự viết prompt + validate JSON** (§3.4); **không** dùng function-calling riêng của model, **không** framework agent | Chạy đồng nhất trên mọi model qua router (hợp mục tiêu thử nhiều model cho tiếng Nhật — §10). Lưới "sai schema → hỏi lại" (§3.4) bắt lỗi format. Chuyển sang structured output sau này rất nhẹ (ranh giới "LLM trả JSON → code validate" không đổi) |
 | **Q5** | Session Store & PII Vault (§2.4/2.5) | TTL **sliding 30'** (refresh mỗi lượt) + **rút vault** ngay sau cửa sổ sửa nhanh 2' (BR-17); **mã hóa app-level** riêng field `vault` (key env/KMS); **một Redis** cho MVP | Sau `DONE`+hết 2': xóa PII, giữ state/booking_code tới hết TTL. Tách store vault riêng để dành production nếu audit yêu cầu (7.1) |

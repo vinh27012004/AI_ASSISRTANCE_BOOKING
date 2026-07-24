@@ -140,31 +140,12 @@ paths:
     post:
       tags: [booking-flow]
       summary: Tạo booking (bước 11 — UC-01). Transaction + lock slot (BR-08, BR-12)
-      security:
-        - {}
-        - channelApiKey: []
-      parameters:
-        - name: Idempotency-Key
-          in: header
-          required: false
-          schema: { type: string, maxLength: 64 }
-          description: |
-            BE đọc key + lưu bảng idempotency_key→booking (GĐ2, api-design §7.1):
-            gửi lại cùng key trả về đúng booking đã tạo (200), không tạo bản ghi thứ hai.
-            Chatbot dùng conversation_id; FE web có thể dùng uuid. Xem QĐ#2.
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/BookingCreateRequest" }
       responses:
-        "200":
-          description: |
-            Idempotent replay — Idempotency-Key đã dùng, trả lại booking đã tạo trước đó
-            (kèm edit_token mới). Không tạo bản ghi thứ hai (api-design §7.1, QĐ#2).
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/BookingCreated" }
         "201":
           description: Tạo thành công — mã đặt chỗ gửi kèm email qua SES (BR-15)
           content:
@@ -515,14 +496,6 @@ components:
       in: header
       name: X-Edit-Token
       description: JWT ngắn hạn {booking_id, exp +120s} — BE cấp lúc tạo booking (BR-17)
-    channelApiKey:
-      type: apiKey
-      in: header
-      name: X-Api-Key
-      description: |
-        Xác thực kênh client GĐ2 (chatbot — api-design §7.2). Middleware đối chiếu hash trong
-        bảng channel_api_key, rate-limit riêng theo key. Thiếu/sai → 401 CHANNEL_UNAUTHORIZED,
-        vượt hạn → 429 RATE_LIMITED. Luồng đặt chỗ vẫn public cho FE web (security: [{}]).
 
   schemas:
     Gender:
@@ -702,7 +675,6 @@ components:
                 - SHOP_CHANGE_NOT_ALLOWED
                 - EDIT_TOKEN_EXPIRED
                 - RATE_LIMITED
-                - CHANNEL_UNAUTHORIZED
                 - INTERNAL_ERROR
             message: { type: string }
             details:
