@@ -40,9 +40,15 @@ def build_prompt(state_key: str, session: Session, api_result: dict, lang: str) 
     }
 
 
+# Câu chứa số/mã THẬT mà LLM có thể sửa/bịa (shop_phone, booking_code, giờ trống) -> LUÔN
+# dùng template code, KHÔNG qua LLM (§10: cấm LLM tự sinh số liệu; số trong nút do code tạo,
+# text phải khớp). Đa ngôn ngữ vẫn giữ vì template đã tách vi/en/ja.
+_LITERAL_SAFE_KEYS = {"SLOT", "END", "HANDOFF", "ERROR", "DONE", "UPDATED", "CANCELLED"}
+
+
 def generate(prompt: dict, llm: RealLLMClient | None) -> str:
-    """Sinh câu. Không router -> câu mẫu offline theo state × lang."""
-    if llm is None:
+    """Sinh câu. Không router HOẶC câu chứa số/mã thật -> câu mẫu code (khớp chính xác)."""
+    if llm is None or prompt["key"] in _LITERAL_SAFE_KEYS:
         return templates.fake_sentence(prompt["key"], prompt["lang"], prompt["facts"])
     try:
         user = json.dumps(
@@ -77,6 +83,7 @@ def _facts_for(state_key: str, session: Session, api_result: dict) -> dict:
             f'{a.get("name")} · {a.get("duration_min")} phút · {a.get("price")}¥'
             for a in ar.get("addons", [])
         ]
+        facts["nhac_nguoi"] = _addon_guest_prefix(session)   # "Người n/m: " khi đặt nhóm
     elif state_key == "THERAPIST":
         facts["nhan_vien"] = [
             f'{t.get("name")} ({"nữ" if t.get("gender") == "female" else "nam"})'
@@ -97,6 +104,21 @@ def _facts_for(state_key: str, session: Session, api_result: dict) -> dict:
         facts["message"] = ar.get("message", "")
         facts["shop_phone"] = ar.get("shop_phone") or session.shop_phone or ""
     return facts
+
+
+def _addon_guest_prefix(session: Session) -> str:
+    """Tiền tố "Người n/m: " khi đặt NHÓM (add-on riêng từng người — BR-10). Đơn -> ''."""
+    s = session.slots
+    tong = s.party_size or 1
+    if tong <= 1:
+        return ""
+    n = min(s.addon_guest_idx, tong - 1) + 1
+    lang = session.lang
+    if lang == "en":
+        return f"Person {n}/{tong}: "
+    if lang == "ja":
+        return f"{n}/{tong}人目: "
+    return f"Người {n}/{tong}: "
 
 
 # Nhãn phone/email + từ nối theo ngôn ngữ, để câu hỏi CONTACT chỉ nhắc phần còn thiếu.
@@ -137,8 +159,9 @@ def _order_summary(session: Session, api_result: dict) -> str:
         parts.append(f"gói {course_name}")
     elif s.duration:
         parts.append(f"{s.duration} phút")
-    if s.addons:
-        parts.append(f"+{len(s.addons)} dịch vụ thêm")
+    total_addons = sum(len(g) for g in s.guest_addons)
+    if total_addons:
+        parts.append(f"+{total_addons} dịch vụ thêm")
     if s.therapist_gender:
         parts.append("nhân viên " + ("nữ" if s.therapist_gender == "female" else "nam"))
     elif s.therapist_id:

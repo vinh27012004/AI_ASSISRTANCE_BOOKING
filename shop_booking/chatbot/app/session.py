@@ -24,8 +24,9 @@ class Slots:
     duration: Optional[int] = None        # phút
     course_id: Optional[int] = None
     course_name: Optional[str] = None     # cache tên/thời lượng course đã chọn (đọc lại ở CONFIRM)
-    addons: list[int] = field(default_factory=list)
-    addons_decided: bool = False          # đã chốt add-on (kể cả "không thêm") — bước ADDON riêng
+    guest_addons: list[list[int]] = field(default_factory=list)  # add-on RIÊNG từng người (BR-10)
+    addon_guest_idx: int = 0              # đang hỏi add-on cho người thứ mấy (0-based)
+    addons_decided: bool = False          # đã chốt add-on cho MỌI người — bước ADDON riêng
     slot: Optional[str] = None            # "HH:MM" đã chốt
     therapist_id: Optional[int] = None    # khách chỉ định đích danh (chỉ party_size==1)
     therapist_gender: Optional[str] = None
@@ -39,6 +40,14 @@ class Slots:
     course_text: Optional[str] = None
     therapist_text: Optional[str] = None
     party_over: bool = False              # khách nói >3 người -> nhánh handoff (BR-14)
+
+    def ensure_guest_addons(self) -> None:
+        """Đảm bảo guest_addons có đúng party_size ô (mỗi người 1 danh sách add-on)."""
+        n = self.party_size or 1
+        while len(self.guest_addons) < n:
+            self.guest_addons.append([])
+        if len(self.guest_addons) > n:
+            del self.guest_addons[n:]
 
 
 @dataclass
@@ -69,7 +78,7 @@ class Session:
     def maybe_drop_vault(self) -> None:
         """Rút vault sau cửa sổ sửa nhanh 2' khi phiên đã kết thúc (Q5). Giữ state/booking_code
         tới hết TTL để khách còn tra lại, nhưng PII thì xóa sớm."""
-        terminal = self.state in ("DONE", "END", "HUMAN")
+        terminal = self.state in ("DONE", "CANCELLED", "END", "HUMAN")
         expired = self.edit_token_expires_at is None or time.time() > self.edit_token_expires_at
         if terminal and expired and self.vault:
             self.vault = {}

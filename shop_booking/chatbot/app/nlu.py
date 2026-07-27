@@ -78,18 +78,37 @@ def validate_schema(obj) -> dict | None:
 
 
 def _normalize_entities(entities: dict) -> dict:
-    """Lưới an toàn: nếu LLM vẫn trả date tương đối ('tomorrow'/'mai'…) thay vì ISO,
-    quy về YYYY-MM-DD ở đây; không quy được thì bỏ (None) để state machine hỏi lại —
-    thà hỏi lại còn hơn để 'tomorrow' lọt vào slots.date rồi shop_api báo lỗi."""
+    """Lưới an toàn: nếu LLM vẫn trả date tương đối ('tomorrow'/'mai'…) hay dạng rời
+    ('31/7', 'ngày 31 tháng 8') thay vì ISO, quy về YYYY-MM-DD ở đây; không quy được thì
+    bỏ (None) để state machine hỏi lại — thà hỏi lại còn hơn để 'tomorrow' lọt vào
+    slots.date rồi shop_api báo lỗi.
+
+    KHÔNG suy số trần ('31') ở đây: NLU không biết đang ở bước nào nên '3' có thể là số
+    người; số trần chỉ được diễn giải theo NGỮ CẢNH ở orchestrator khi đang hỏi ngày."""
     d = entities.get("date")
     if d:
-        entities["date"] = _to_iso_date(d)
+        entities["date"] = _to_iso_date(d) or parse_date_freeform(str(d), allow_bare_day=False)
     return entities
 
 
 _REL_TODAY = {"today", "hôm nay", "hom nay", "nay", "今日", "本日", "きょう"}
 _REL_TOMORROW = {"tomorrow", "ngày mai", "ngay mai", "mai", "明日", "あした", "あす"}
 _REL_DAY_AFTER = {"day after tomorrow", "ngày kia", "ngay kia", "mốt", "mot", "明後日"}
+
+_CJK_RE = re.compile(r"[぀-ヿ一-鿿]")
+
+
+def _match_rel(low: str, words: set[str]) -> bool:
+    """Khớp từ chỉ ngày tương đối. Từ Latin/Việt cần RANH GIỚI TỪ (\\b) để 'mai' không dính
+    trong 'email', 'nay' không dính trong 'ngày'…; từ Nhật (CJK không có ranh giới) dùng
+    chuỗi con."""
+    for w in words:
+        if _CJK_RE.search(w):
+            if w in low:
+                return True
+        elif re.search(rf"\b{re.escape(w)}\b", low):
+            return True
+    return False
 
 
 def _to_iso_date(value: str) -> str | None:
@@ -102,6 +121,99 @@ def _to_iso_date(value: str) -> str | None:
         return (date.today() + timedelta(days=1)).isoformat()
     if v in _REL_DAY_AFTER:
         return (date.today() + timedelta(days=2)).isoformat()
+    return None
+
+
+def parse_date_freeform(text: str, *, allow_bare_day: bool = False,
+                        today: date | None = None) -> str | None:
+    """Diễn giải NGÀY khách gõ tự do -> 'YYYY-MM-DD', lấy lần xuất hiện GẦN NHẤT >= hôm nay.
+
+    Hiểu: ISO đầy đủ; tương đối (hôm nay/mai/mốt…); 'd/m' · 'd-m' · 'd.m' (+ năm tùy chọn);
+    'ngày D [tháng M]' · 'D tháng M' · 'day D'; kiểu Nhật '(M月)?D日'. Khi `allow_bare_day`
+    thì hiểu cả SỐ TRẦN 'D' — chỉ bật khi ĐANG hỏi ngày, để '3' ở bước khác không bị hiểu
+    nhầm là ngày mùng 3.
+
+    Thiếu tháng -> chọn tháng gần nhất mà ngày đó còn ở tương lai (vd hôm nay 27/7, gõ '5'
+    -> 5/8). Không hợp lệ (vd '31/2', '99') -> None để bot hỏi lại."""
+    if not text:
+        return None
+    today = today or date.today()
+    low = text.strip().lower()
+
+    m = re.search(r"\b(\d{4})-(\d{1,2})-(\d{1,2})\b", low)          # ISO
+    if m:
+        try:
+            return date(int(m[1]), int(m[2]), int(m[3])).isoformat()
+        except ValueError:
+            return None
+
+    for words, delta in ((_REL_TODAY, 0), (_REL_TOMORROW, 1), (_REL_DAY_AFTER, 2)):
+        if _match_rel(low, words):                     # ranh giới từ: 'mai' KHÔNG khớp trong 'email'
+            return (today + timedelta(days=delta)).isoformat()
+
+    day = month = None
+    m = re.search(r"(?:(\d{1,2})\s*月\s*)?(\d{1,2})\s*日", low)      # (M月)?D日
+    if m:
+        month = int(m[1]) if m[1] else None
+        day = int(m[2])
+    if day is None:                                                 # ngày D [tháng M] / day D
+        m = re.search(r"\b(?:ngày|ngay|day)\s*0*(\d{1,2})"
+                      r"(?:\s*(?:tháng|thang|month|[/.\-])\s*0*(\d{1,2}))?", low)
+        if m:
+            day, month = int(m[1]), (int(m[2]) if m[2] else None)
+    if day is None:                                                 # D tháng M
+        m = re.search(r"\b0*(\d{1,2})\s*(?:tháng|thang)\s*0*(\d{1,2})\b", low)
+        if m:
+            day, month = int(m[1]), int(m[2])
+    if day is None:                                                 # d/m[/y] · d-m · d.m
+        m = re.search(r"\b0*(\d{1,2})\s*[/.\-]\s*0*(\d{1,2})"
+                      r"(?:\s*[/.\-]\s*(\d{2,4}))?\b", low)
+        if m:
+            day, month = int(m[1]), int(m[2])
+            if m[3]:
+                yr = int(m[3])
+                yr = yr + 2000 if yr < 100 else yr
+                for d_, m_ in ((day, month), (month, day)):         # thử cả d/m lẫn m/d
+                    try:
+                        return date(yr, m_, d_).isoformat()
+                    except ValueError:
+                        continue
+                return None
+    if day is None and allow_bare_day:                              # số trần (chỉ khi đang hỏi ngày)
+        m = re.fullmatch(r"\s*0*(\d{1,2})\s*", low)
+        if m:
+            day = int(m[1])
+
+    if day is None or not (1 <= day <= 31):
+        return None
+    if month is not None and not (1 <= month <= 12):
+        return None
+    return _resolve_next_date(day, month, today)
+
+
+def _resolve_next_date(day: int, month: int | None, today: date) -> str | None:
+    """Ngày gần nhất >= `today` khớp (day[, month]). Dò tối đa ~14 tháng rồi bó tay (None)."""
+    def make(y: int, m: int) -> date | None:
+        try:
+            return date(y, m, day)
+        except ValueError:                # vd 31 ở tháng chỉ có 30 ngày
+            return None
+
+    if month is not None:
+        for y in (today.year, today.year + 1):
+            d = make(y, month)
+            if d and d >= today:
+                return d.isoformat()
+        return None
+
+    y, m = today.year, today.month
+    for _ in range(15):
+        d = make(y, m)
+        if d and d >= today:
+            return d.isoformat()
+        m += 1
+        if m > 12:
+            m, y = 1, y + 1
     return None
 
 
@@ -168,15 +280,9 @@ def _rule_based(text: str) -> dict:
     entities = {k: None for k in _ENTITY_KEYS}
     entities["addons"] = []
 
-    # date
-    if re.search(r"\b(hôm nay|today|今日)\b", low):
-        entities["date"] = date.today().isoformat()
-    elif re.search(r"\b(ngày mai|mai|tomorrow|明日|あした)\b", low):
-        entities["date"] = (date.today() + timedelta(days=1)).isoformat()
-    else:
-        m = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", low)
-        if m:
-            entities["date"] = m.group(1)
+    # date — ISO/tương đối/'d/m'/'ngày D tháng M'/'D日'. KHÔNG lấy số trần ở đây (NLU
+    # không biết bước hiện tại; số trần diễn giải theo ngữ cảnh ở orchestrator bước DATE).
+    entities["date"] = parse_date_freeform(low, allow_bare_day=False)
 
     # time: "8:00", "8h", "8 giờ", "14:30"
     m = re.search(r"\b(\d{1,2})(?::|h|時|\s*giờ)(\d{2})?\b", low)

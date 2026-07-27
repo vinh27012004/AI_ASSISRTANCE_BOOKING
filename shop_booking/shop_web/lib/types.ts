@@ -38,6 +38,18 @@ export type SlotsResponse = {
   slots: string[];
 };
 
+/**
+ * GET /shops/{id}/availability?from=&to= — ngày shop mở/đóng trong khoảng.
+ * "Đóng" = không nhân viên nào có ca (cùng tín hiệu reason=SHOP_CLOSED). Lịch dùng
+ * `closed_dates` để gạch sẵn ngày nghỉ mà khỏi bắt khách bấm thử từng ngày.
+ */
+export type AvailabilityResponse = {
+  from: string;
+  to: string;
+  open_dates: string[];
+  closed_dates: string[];
+};
+
 export type CustomerInfo = {
   member_type: "member" | "guest";
   rank: string | null;

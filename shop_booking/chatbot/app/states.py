@@ -38,8 +38,9 @@ STATE_ORDER = [
 
 TERMINAL_STATES = {DONE, CANCELLED, END, HUMAN}
 
-# State nào gọi shop_api khi vào (bước ④) — dùng ở run_state_action.
-STATES_WITH_API = {SHOP, COURSE, ADDON, SLOT, THERAPIST, CONTACT, CREATE, UPDATE}
+# State nào gọi shop_api khi vào (bước ④) — dùng ở run_state_action. DATE dò ngày shop
+# có ca (GET /therapists?date= cho ~2 tuần tới) để chỉ mời ngày cửa hàng thực sự mở.
+STATES_WITH_API = {SHOP, DATE, COURSE, ADDON, SLOT, THERAPIST, CONTACT, CREATE, UPDATE}
 
 
 def entry_condition(state: str, session: Session) -> bool:

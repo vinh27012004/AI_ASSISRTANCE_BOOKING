@@ -1,8 +1,9 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { api } from "@/lib/api";
 import { useRequest } from "@/lib/use-request";
+import { toIso, today } from "@/lib/format";
 import type {
   BookingCreated,
   CustomerInfo,
@@ -29,7 +30,6 @@ export function BookingWizard() {
   const [shop, setShop] = useState<Shop | null>(null);
   const [date, setDate] = useState<string | null>(null);
   const [partySize, setPartySize] = useState<PartySize>(1);
-  const [closedDates, setClosedDates] = useState<ReadonlySet<string>>(new Set());
 
   // --- Bước 2
   const [courseId, setCourseId] = useState<number | null>(null);
@@ -64,14 +64,22 @@ export function BookingWizard() {
     (signal) => api.services(shop!.id, { date: date!, partySize }, signal),
   );
 
-  const closedDate = services.data?.reason === "SHOP_CLOSED" ? date : null;
-
-  // Ghi nhớ ngày đã biết là shop nghỉ để lịch gạch sẵn, khỏi bắt khách thử lại.
-  // Cập nhật ngay lúc render (React re-render trước khi vẽ) thay vì trong
-  // effect — tránh một vòng render thừa.
-  if (closedDate && !closedDates.has(closedDate)) {
-    setClosedDates(new Set(closedDates).add(closedDate));
-  }
+  // Ngày shop nghỉ để lịch GẠCH SẴN (không bắt khách bấm thử từng ngày). Lấy nguyên
+  // khoảng lịch xem được (hôm nay → hết tháng thứ 3) trong MỘT lần gọi; đổi shop thì
+  // key đổi -> tự tải lại theo shop mới, quên ngày nghỉ của shop cũ.
+  const availFrom = toIso(today());
+  const availTo = toIso(
+    new Date(today().getFullYear(), today().getMonth() + 4, 0),
+  );
+  const availability = useRequest(
+    shop ? `avail|${shop.id}|${availFrom}|${availTo}` : null,
+    (signal) =>
+      api.availability(shop!.id, { from: availFrom, to: availTo }, signal),
+  );
+  const closedDates = useMemo<ReadonlySet<string>>(
+    () => new Set(availability.data?.closed_dates ?? []),
+    [availability.data],
+  );
 
   /** Đổi shop/ngày/số người thì mọi lựa chọn dịch vụ + giờ không còn tin được. */
   const resetServiceChoices = (nextPartySize: number = partySize) => {
@@ -86,6 +94,7 @@ export function BookingWizard() {
   const selectShop = (next: Shop) => {
     if (next.id === shop?.id) return;
     setShop(next);
+    // closedDates tự tải lại theo shop mới (key request đổi theo shop.id).
     resetServiceChoices();
   };
 

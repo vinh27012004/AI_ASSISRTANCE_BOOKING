@@ -1,5 +1,5 @@
 from flask import jsonify, request
-from datetime import datetime, date, time
+from datetime import datetime, date, time, timedelta
 import re
 
 from app.extensions import db
@@ -198,6 +198,68 @@ def get_slots(shop_id):
     )
 
     return jsonify({"slots": slots}), 200
+
+
+@api_bp.route("/shops/<int:shop_id>/availability", methods=["GET"])
+def get_availability(shop_id):
+    """Ngày cửa hàng MỞ / ĐÓNG trong khoảng [from, to] — nguồn để lịch FE gạch sẵn ngày
+    nghỉ (không bắt khách bấm thử từng ngày) và để chatbot chỉ mời ngày thực sự mở.
+
+    "Mở" = có ít nhất một nhân viên CÓ CA ngày đó — cùng tín hiệu has_shifts mà
+    GET /services dùng để trả reason=SHOP_CLOSED (case A1), nên hai đường không lệch nhau.
+    Public như các endpoint đặt chỗ khác; chỉ lộ ngày mở/đóng, KHÔNG lộ ca hay ai làm.
+
+    Một truy vấn gộp (distinct work_date trong khoảng) rồi tô ngày, không quét từng ngày.
+    """
+    shop = Shop.query.get(shop_id)
+    if not shop:
+        raise APIError(404, "RESOURCE_NOT_FOUND", "Không tìm thấy dữ liệu yêu cầu.")
+
+    # Mặc định: từ hôm nay, 30 ngày tới (đủ cho chatbot); FE tự truyền khoảng 3 tháng.
+    DEFAULT_DAYS = 30
+    MAX_DAYS = 125                      # đủ phủ lịch 3 tháng của FE, chặn quét khoảng quá dài
+
+    from_str = request.args.get("from")
+    to_str = request.args.get("to")
+    try:
+        from_date = datetime.strptime(from_str, "%Y-%m-%d").date() if from_str else date.today()
+    except ValueError:
+        raise APIError(400, "VALIDATION_ERROR", "Dữ liệu không hợp lệ, vui lòng kiểm tra lại.", {"fields": {"from": "Date must be in YYYY-MM-DD format"}})
+    try:
+        to_date = datetime.strptime(to_str, "%Y-%m-%d").date() if to_str else from_date + timedelta(days=DEFAULT_DAYS)
+    except ValueError:
+        raise APIError(400, "VALIDATION_ERROR", "Dữ liệu không hợp lệ, vui lòng kiểm tra lại.", {"fields": {"to": "Date must be in YYYY-MM-DD format"}})
+
+    if to_date < from_date:
+        raise APIError(400, "VALIDATION_ERROR", "Dữ liệu không hợp lệ, vui lòng kiểm tra lại.", {"fields": {"to": "to must be on or after from"}})
+    if (to_date - from_date).days > MAX_DAYS:
+        to_date = from_date + timedelta(days=MAX_DAYS)
+
+    open_rows = (
+        db.session.query(Shift.work_date)
+        .join(Therapist)
+        .filter(
+            Therapist.shop_id == shop_id,
+            Shift.work_date >= from_date,
+            Shift.work_date <= to_date,
+        )
+        .distinct()
+        .all()
+    )
+    open_set = {r[0] for r in open_rows}
+
+    open_dates, closed_dates = [], []
+    d = from_date
+    while d <= to_date:
+        (open_dates if d in open_set else closed_dates).append(d.isoformat())
+        d += timedelta(days=1)
+
+    return jsonify({
+        "from": from_date.isoformat(),
+        "to": to_date.isoformat(),
+        "open_dates": open_dates,
+        "closed_dates": closed_dates,
+    }), 200
 
 
 @api_bp.route("/shops/<int:shop_id>/timeline", methods=["GET"])

@@ -16,7 +16,7 @@ INSTRUCTION = {
     "DATE": "Hỏi khách muốn đặt vào ngày nào.",
     "PARTY_SIZE": "Hỏi đặt cho mấy người, nhắc tối đa 3 người mỗi lượt.",
     "COURSE": "Hỏi khách chọn course chính (mỗi course đã kèm sẵn thời lượng).",
-    "ADDON": "Hỏi khách có muốn thêm dịch vụ bổ sung (add-on) không; add-on cấm đã ẩn. Có thể bỏ qua.",
+    "ADDON": "Hỏi khách có muốn thêm add-on không (add-on cấm đã ẩn, có thể bỏ qua). Nếu đặt NHÓM thì hỏi RIÊNG cho từng người — facts.nhac_nguoi cho biết đang hỏi người thứ mấy; mỗi người add-on có thể khác nhau (BR-10).",
     "SLOT": "Mời khách chọn khung giờ (các giờ hiện bằng nút); nói thêm khách có thể nhập giờ cụ thể mong muốn nếu chưa thấy giờ ưng ý.",
     "THERAPIST": "Hỏi khách có muốn chỉ định nhân viên (theo tên hoặc giới tính) hay để cửa hàng sắp.",
     "CONTACT": "Xin thông tin liên hệ CÒN THIẾU (đúng theo facts.hoi) để giữ chỗ và gửi mã đặt chỗ. Nếu khách đã cho số điện thoại rồi thì CHỈ hỏi email, đừng hỏi lại số.",
@@ -59,9 +59,9 @@ FAKE = {
         "ja": "メインコースをお選びください。",
     },
     "ADDON": {
-        "vi": "Anh/chị có muốn thêm dịch vụ bổ sung nào không ạ? Nếu không thì bấm “Không thêm”.",
-        "en": "Any add-ons? Tap “No add-on” to skip.",
-        "ja": "追加オプションはいかがですか？不要なら「追加なし」を押してください。",
+        "vi": "{nhac_nguoi}Anh/chị có muốn thêm dịch vụ bổ sung nào không ạ? Nếu không thì bấm “Không thêm”.",
+        "en": "{nhac_nguoi}Any add-ons? Tap “No add-on” to skip.",
+        "ja": "{nhac_nguoi}追加オプションはいかがですか？不要なら「追加なし」を押してください。",
     },
     "SLOT": {
         "vi": "Các khung giờ còn trống: {slots}. Anh/chị chọn giờ nào ạ? (hoặc nhập giờ cụ thể mong muốn)",
@@ -112,9 +112,9 @@ FAKE = {
         "ja": "{message} お手数ですが店舗までご連絡ください：{shop_phone}。",
     },
     "HANDOFF": {
-        "vi": "Dạ phần này em chưa hỗ trợ được. Anh/chị vui lòng gọi cửa hàng: {shop_phone}.",
-        "en": "Sorry, I can't help with that here. Please call the shop: {shop_phone}.",
-        "ja": "申し訳ございません、こちらは対応できません。店舗までお電話ください：{shop_phone}。",
+        "vi": "{message}Anh/chị vui lòng gọi trực tiếp cửa hàng để được hỗ trợ nhé: {shop_phone}.",
+        "en": "{message}Please call the shop directly for assistance: {shop_phone}.",
+        "ja": "{message}お手数ですが店舗まで直接お電話ください：{shop_phone}。",
     },
     "REPROMPT": {
         "vi": "Dạ em chưa rõ ý anh/chị. Anh/chị nói lại ngắn gọn giúp em nhé.",

@@ -61,7 +61,7 @@
 
 - **LLM chỉ xuất hiện ở ① và ⑥** — hiểu input, viết output. Không thấy toàn bộ luồng, không tự quyết định nghiệp vụ.
 - **Bước ③④⑤ là code thuần** — deterministic, test được bằng unit test, không phụ thuộc LLM.
-- Ví dụ mentor đưa: *"Tôi muốn đặt lịch lúc 8 giờ hôm nay"* → ① NLU extract `{date: today, time: 08:00}` → ② merge → ③ state machine thấy đã có date+time nhưng **thiếu duration** → route sang state `DURATION` → ④ (state này không cần API) → ⑤ build prompt từ template "hỏi thời lượng" → ⑥ LLM sinh: *"Bạn muốn massage trong bao lâu ạ? Cửa hàng có các gói 30/45/60/90/120 phút."*
+- Ví dụ: *"Tôi muốn đặt lịch lúc 8 giờ hôm nay"* → ① NLU extract `{date: today, time: 08:00}` → ② merge (giữ `08:00` làm "giờ mong muốn") → ③ state machine thấy đã có date nhưng **chưa chọn cửa hàng** → route sang state `SHOP` → ④ `GET /shops` → ⑤ build prompt template `SHOP` → ⑥ LLM sinh: *"Dạ anh/chị muốn đặt ở cửa hàng nào ạ?"* (kèm nút chọn shop).
 
 ---
 
@@ -112,20 +112,27 @@ flowchart TB
 
 Mỗi state khai báo 4 thứ: **slot cần có để rời state**, **điều kiện vào**, **API gọi khi vào**, **template prompt cho NLG**.
 
+> **Cập nhật khi triển khai** (khác bản thiết kế đầu, để khớp code): (1) **bỏ `DURATION`** — mỗi course đã kèm sẵn thời lượng; (2) tách `SERVICE` thành **`COURSE` + `ADDON`** riêng, add-on chọn **RIÊNG từng người** cho nhóm (BR-10); (3) **`THERAPIST` đặt TRƯỚC `SLOT`** — chỉ định người trước để `GET /slots` lọc đúng giờ người đó rảnh (nhóm ≥2 bỏ qua THERAPIST); (4) thêm state sửa/hủy trong phiên `UPDATE`/`CANCELLED`/`MODIFY`.
+
 | State | Slot phải có để qua state sau | Điều kiện vào | API gọi (bước ④) | Prompt NLG (bước ⑤) |
 |---|---|---|---|---|
-| `GREETING` | — | bắt đầu phiên | — | chào + hỏi nhu cầu |
-| `SHOP` | `shop_id` | — | `GET /shops` (lấy danh sách để render nút) | hỏi chọn cửa hàng |
+| `GREETING` | — (đã chào) | bắt đầu phiên | — | chào (nói rõ **trợ lý AI**) + **mời chọn ngôn ngữ** (nút vi/en/ja) |
+| `SHOP` | `shop_id` | — | `GET /shops` | hỏi chọn cửa hàng |
 | `DATE` | `date` | có `shop_id` | — | hỏi ngày |
 | `PARTY_SIZE` | `party_size` (1–3) | có `date` | — | hỏi số người; >3 → nhánh handoff (BR-14) |
-| `DURATION` | `duration` | có `party_size` | — | hỏi thời lượng |
-| `SERVICE` | `course_id` (+ `addons`) | có `duration` | `GET /services?date=` | hỏi course; disable add-on cấm (BR-09) |
-| `SLOT` | `slot` | đủ shop/date/service/party | `GET /slots?...` | đọc 3–5 giờ trống gần mong muốn |
-| `THERAPIST` | `therapist` hoặc "bỏ qua" | **chỉ khi `party_size==1`** (BR-04) | `GET /therapists?date=` | hỏi có chỉ định không |
-| `CONTACT` | `phone`, `email` | có `slot` | `POST /customers/lookup` (chặn NG — BR-06) | hỏi SĐT + email |
+| `COURSE` | `course_id` | có `party_size` | `GET /shops/{id}/services?date=` | hỏi course chính (nhãn kèm sẵn thời lượng) |
+| `ADDON` | `addons_decided` | có `course_id` | `GET /shops/{id}/services?date=` | hỏi add-on **RIÊNG từng người** (BR-10); ẩn add-on cấm (BR-09) |
+| `THERAPIST` | `therapist` hoặc "bỏ qua" | **chỉ khi `party_size==1`** (BR-04) | `GET /therapists?date=` | hỏi có chỉ định không (map **tên→id**) |
+| `SLOT` | `slot` | đã chọn/bỏ therapist | `GET /slots?…&therapist_id=` | đọc giờ trống (lọc theo người đã chọn; bỏ giờ đã qua nếu là hôm nay) |
+| `CONTACT` | `phone`, `email` (đã lookup) | có `slot` | `POST /customers/lookup` (chặn NG — BR-06) | hỏi **phần còn thiếu** (SĐT/email) |
 | `CONFIRM` | khách xác nhận "đồng ý" | đủ mọi slot | — | đọc lại toàn bộ đơn, xin xác nhận |
 | `CREATE` | (kết quả) | đã confirm | `POST /bookings` | báo thành công + mã, hoặc xử lý lỗi |
-| `DONE` | — | tạo xong | — | kết thúc / mời sửa nhanh (BR-17) |
+| `UPDATE` | (kết quả) | đang sửa + confirm | `PATCH /bookings/{code}` | báo đã cập nhật lịch |
+| `DONE` | — | tạo/sửa xong | — | kết thúc; nút `[✏️ Sửa][🗑 Hủy]` (BR-17) |
+| `CANCELLED` | — | đã hủy | (`cancel` đã gọi) | xác nhận đã hủy |
+| `MODIFY` | — | bấm "Sửa lịch" | — | hỏi đổi gì (nút: ngày giờ / số người / dịch vụ) |
+| `END` | — | A5 `PHONE_BLOCKED` | — | không đặt online được, đưa SĐT cửa hàng |
+| `HUMAN`* | — | handoff | — | *(MVP: chỉ nút `[📞 Gọi cửa hàng]`; state HUMAN dời phase sau — DD Q9)* |
 
 ### 3.2 Logic chuyển state (bước ③ — code, không phải LLM)
 
@@ -137,8 +144,8 @@ next_state = state đầu tiên (theo thứ tự bảng 3.1) mà slot yêu cầu
 ```
 
 Nhờ vậy:
-- Khách nói gộp *"mai 2 người 60 phút"* → merge lấp `date, party_size, duration` một lượt → state machine nhảy thẳng tới `SERVICE`, không hỏi lại 3 câu.
-- Khách sửa giữa chừng *"à cho 3 người"* → cập nhật `party_size`, các slot sau vẫn giữ; nếu `party_size` đổi từ 1→3 thì slot `therapist` bị **xóa** (không còn hợp lệ — BR-04) và state quay lại nhánh phù hợp.
+- Khách nói gộp *"mai 2 người"* → merge lấp `date, party_size` một lượt → state machine nhảy thẳng tới `COURSE`, không hỏi lại từng câu.
+- Khách sửa giữa chừng *"à cho 3 người"* → cập nhật `party_size`, nếu đổi 1→≥2 thì `therapist` bị **xóa** (BR-04) và **add-on chọn lại** (cấu trúc theo từng người đổi); state quay lại nhánh phù hợp.
 
 ### 3.3 Ví dụ một lượt (đúng mô hình mentor)
 
@@ -177,6 +184,8 @@ Bước ① gọi LLM với instruction "chỉ trích xuất, không trả lời
 
 Code validate JSON này trước khi merge (sai schema → coi như không trích được, hỏi lại). Đây là ranh giới rõ giữa "LLM hiểu" và "code quyết định".
 
+> Ghi chú triển khai: `duration` chỉ còn là **gợi ý** (không còn state hỏi thời lượng — course đã quyết thời lượng). `course`/`therapist` là text tự do → code **map về `id`** qua tool response (vd tên "Hana" → `therapist_id`), không tin nguyên văn. `date` tương đối ("mai") được quy về `YYYY-MM-DD` (có truyền "hôm nay" cho LLM). Ngôn ngữ **do khách chọn ở màn chào** (không đoán từ NLU nữa — xem §7).
+
 ---
 
 ## 4. Tools — API giai đoạn 1 do State Machine gọi (không phải LLM tự gọi)
@@ -184,13 +193,14 @@ Code validate JSON này trước khi merge (sai schema → coi như không tríc
 | Bước gọi | API | Ghi chú |
 |---|---|---|
 | vào `SHOP` | `GET /shops` | render nút chọn |
-| vào `SERVICE` | `GET /shops/{id}/services?date=` | `restricted_course_ids` để chặn combo cấm sớm (BR-09) |
-| vào `SLOT` | `GET /shops/{id}/slots?...` | trả giờ trống thật |
-| vào `THERAPIST` | `GET /shops/{id}/therapists?date=` | chỉ khi `party_size==1` (BR-04) |
+| vào `COURSE` | `GET /shops/{id}/services?date=` | chọn course chính |
+| vào `ADDON` | `GET /shops/{id}/services?date=` | `restricted_course_ids` để ẩn combo cấm sớm (BR-09); add-on **riêng từng người** (BR-10) |
+| vào `THERAPIST` | `GET /shops/{id}/therapists?date=` | chỉ khi `party_size==1` (BR-04); **trước** SLOT |
+| vào `SLOT` | `GET /shops/{id}/slots?…&therapist_id=&addon_ids=` | lọc theo người đã chỉ định + **hợp** add-on cả nhóm; bỏ giờ đã qua nếu hôm nay |
 | vào `CONTACT` | `POST /customers/lookup` | phát hiện NG list (BR-06) |
 | `CREATE` | `POST /bookings` | gọi như client public; BE dedup 120s chống bấm đúp |
-| (sửa trong phiên) | `PATCH /bookings/{code}` | dùng `edit_token` còn hạn 2 phút (BR-17) |
-| (hủy) | `POST /bookings/{code}/cancel` | |
+| `UPDATE` (sửa trong phiên) | `PATCH /bookings/{code}` | `X-Edit-Token` còn hạn 2 phút (BR-17) hoặc email (BR-15) |
+| (hủy) | `POST /bookings/{code}/cancel` | email trong body |
 
 Mọi validate nghiệp vụ vẫn do BE làm — chatbot chỉ hỏi/hiển thị, BE là chốt chặn cuối.
 
@@ -202,11 +212,13 @@ BE trả `error.code` → state machine chọn nhánh xử lý + template tươn
 |---|---|---|
 | `SLOT_CONFLICT` | quay lại `SLOT`, đọc `suggested_slots` | "Giờ đó vừa hết, còn 14:15/14:30/15:00…" (A6) |
 | `PHONE_BLOCKED` | sang `END` | "SĐT này không đặt online được, liên hệ cửa hàng…" (A5) |
-| `THERAPIST_OFF_SHIFT` | quay lại `THERAPIST`/`SLOT` | "Nhân viên đó không có ca, đổi giờ hay bỏ chỉ định?" (A4) |
-| `INVALID_COMBO` | quay lại `SERVICE` | "Add-on đó không kèm được course này…" (A3) |
+| `THERAPIST_OFF_SHIFT` | quay lại `THERAPIST` | "Nhân viên đó không có ca, đổi giờ hay bỏ chỉ định?" (A4) |
+| `INVALID_COMBO` | quay lại `ADDON` | "Add-on đó không kèm được course này…" (A3) |
 | `PARTY_SIZE_EXCEEDED` | nhánh handoff | ">3 người vui lòng liên hệ cửa hàng" (A8/BR-14) |
 | `MODIFY_DEADLINE_PASSED` | thông báo | "Sát giờ hẹn, không đổi online được…" (BR-16) |
 | `INTERNAL_ERROR` | giữ state, mời thử lại | "Hệ thống trục trặc, thử lại sau…" (A7/BR-12) |
+
+> Chống LLM bịa số liệu (§10): câu chứa **số/mã thật** (SĐT cửa hàng ở `END`/handoff, `booking_code` ở `DONE`, giờ trống ở `SLOT`, message lỗi ở `ERROR`) **không đi qua LLM** — dựng bằng template code để nội suy chính xác. LLM chỉ diễn đạt các câu hỏi (SHOP/DATE/COURSE…).
 
 ### 4.2 Guardrails
 
@@ -226,16 +238,16 @@ sequenceDiagram
     participant L as LLM Router (NLU/NLG)
     participant B as shop_api
 
-    K->>O: "Đặt massage mai, 2 người, 60 phút toàn thân"
+    K->>O: "Đặt massage mai, 2 người, toàn thân"
     O->>L: ① NLU: trích param
-    L-->>O: {date:mai, party_size:2, duration:60, course:"toàn thân"}
-    Note over O: ③ state machine → còn thiếu slot → vào SERVICE
+    L-->>O: {date:mai, party_size:2, course:"toàn thân"}
+    Note over O: ③ state machine → chưa có course_id → vào COURSE
     O->>B: ④ GET /services?date=
     B-->>O: courses/addons
-    O->>L: ⑤⑥ NLG (template SERVICE + options)
+    O->>L: ⑤⑥ NLG (template COURSE + options)
     L-->>O: câu hỏi tự nhiên
-    O->>K: "Với gói toàn thân 60' bên em có… anh/chị chọn giúp?" (kèm nút)
-    K->>O: chọn course → (state machine tiến dần tới SLOT → CONTACT)
+    O->>K: "Với gói toàn thân bên em có… anh/chị chọn giúp?" (kèm nút)
+    K->>O: chọn course → ADDON (add-on từng người) → THERAPIST → SLOT → CONTACT
     Note over O,B: tại CONTACT: mask PII → POST /customers/lookup (NG check)
     O->>K: đọc lại đơn (state CONFIRM) → "Xác nhận đặt nhé?"
     K->>O: "OK"
@@ -281,7 +293,7 @@ Kết quả: nhà cung cấp LLM chỉ thấy *ý định*, không nhận PII n�
 1. **Cấu hình router**: bật lọc provider *zero-retention / không train*; lưu ảnh chụp setting, kiểm tra định kỳ
 2. **LLM adapter** `llm_client.py`: đổi provider chỉ sửa `base_url`+`api_key` (dễ chuyển Bedrock Tokyo / self-host)
 3. **Log cũng mask**, TTL 30–90 ngày; session store mã hóa at-rest
-4. **Minh bạch**: câu chào nói rõ đang chat với AI (yêu cầu APPI)
+4. **Minh bạch**: câu chào **nói rõ "trợ lý đặt lịch AI"** ngay từ đầu (3 thứ tiếng) + badge "AI" trên widget (yêu cầu APPI)
 
 ### 6.4 So sánh phương án LLM
 
@@ -298,9 +310,9 @@ Kết quả: nhà cung cấp LLM chỉ thấy *ý định*, không nhận PII n�
 
 ## 7. Thiết kế hội thoại
 
-- **Đa ngôn ngữ (Nhật/Anh/Việt)**: NLU nhận diện lang từ tin nhắn đầu → lưu vào session → mọi prompt NLG truyền `lang`. Dữ liệu nghiệp vụ (tên course tiếng Nhật) giữ nguyên, gọi API bằng `id`. Format ¥/giờ theo locale.
-- **Human handoff** *(quyết định 5)*: bot bí → 2 nút `[📞 Gọi cửa hàng]` `[💬 Chat nhân viên]` (nút 2 chỉ hiện khi có người online). Handoff → state `HUMAN`, bot ngừng tự trả lời, nhân viên thấy lịch sử (đã mask PII). Cần thêm màn "Hộp thư hỗ trợ" cho nhân viên (mục 10).
-- **Lựa chọn dạng nút** cho shop/số người/slot/course — giảm gõ, giảm NLU sai.
+- **Đa ngôn ngữ (Nhật/Anh/Việt)**: khách **CHỌN ngôn ngữ ở màn chào** (nút vi/en/ja) → lưu session + **khoá** (không tự đoán nữa, tránh gõ email/SĐT làm nhảy ngôn ngữ). *(Nếu khách gõ thẳng chưa chọn: đoán best-effort, đã bỏ email/SĐT/mã trước khi đoán.)* Mọi prompt NLG truyền `lang`; dữ liệu nghiệp vụ giữ nguyên, gọi API bằng `id`.
+- **Human handoff** *(quyết định 5)*: **MVP chỉ nút `[📞 Gọi cửa hàng]`** (đưa `shop_phone`). Nút `[💬 Chat nhân viên]` + state `HUMAN` + màn "Hộp thư hỗ trợ" cho nhân viên **dời phase sau** (DD Q9; điều kiện: wireframe màn hộp thư).
+- **Lựa chọn dạng nút** cho ngôn ngữ/shop/số người/slot/course/add-on/therapist — giảm gõ, giảm NLU sai; nút bấm xử lý **tất định** (không qua LLM).
 
 ---
 

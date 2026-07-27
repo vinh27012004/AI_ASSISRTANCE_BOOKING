@@ -89,6 +89,11 @@ class ShopApiClient:
     def get_therapists(self, shop_id: int, date: str) -> dict:
         return self._request("GET", f"/shops/{shop_id}/therapists", params={"date": date})
 
+    def get_availability(self, shop_id: int, date_from: str, date_to: str) -> dict:
+        # Ngày shop mở/đóng trong [from,to] (mở = có ca) — 1 lần gọi thay vì dò từng ngày.
+        return self._request("GET", f"/shops/{shop_id}/availability",
+                             params={"from": date_from, "to": date_to})
+
     def lookup_customer(self, phone: str) -> dict:
         return self._request("POST", "/customers/lookup", body={"phone": phone})
 

@@ -114,10 +114,13 @@ def _invalidate(session: Session, changed: set[str]) -> None:
         s.therapist_id = None
         s.therapist_gender = None
         s.therapist_decided = False
-    # Đổi course -> add-on cũ chưa chắc còn kèm được (BR-09), buộc chọn lại add-on.
-    if "course_id" in changed:
-        s.addons = []
+    # Đổi course (add-on cũ chưa chắc còn kèm được — BR-09) hoặc đổi số người (cấu trúc
+    # add-on theo từng người thay đổi) -> chọn lại add-on từ đầu.
+    if changed & {"course_id", "party_size"}:
+        s.guest_addons = []
         s.addons_decided = False
+        s.addon_guest_idx = 0
+    if "course_id" in changed:
         s.course_name = None
     # BR-07: đổi course/party/date -> slot cũ chưa chắc còn hợp lệ, buộc chọn lại.
     if changed & {"course_id", "party_size", "date"}:
@@ -189,17 +192,21 @@ def apply_button(session: Session, text: str) -> str | None:
     elif key == "course":
         s.course_id = _to_int(value); changed.add("course_id")
     elif key == "addon":
-        if value == "done":                          # chốt add-on đã chọn
-            s.addons_decided = True
-        elif value in ("none", "skip"):              # không thêm add-on
-            s.addons = []; s.addons_decided = True
+        s.ensure_guest_addons()                      # add-on RIÊNG từng người (BR-10)
+        idx = min(s.addon_guest_idx, len(s.guest_addons) - 1)
+        if value == "done":                          # xong người này -> người kế / chốt hết
+            _advance_addon_guest(s)
+        elif value in ("none", "skip"):              # người này không thêm
+            s.guest_addons[idx] = []
+            _advance_addon_guest(s)
         else:
             aid = _to_int(value)
             if aid is not None:
-                if aid in s.addons:
-                    s.addons.remove(aid)
+                cur = s.guest_addons[idx]
+                if aid in cur:
+                    cur.remove(aid)
                 else:
-                    s.addons.append(aid)
+                    cur.append(aid)
     elif key == "slot":
         s.slot = value; changed.add("slot")
     elif key == "therapist":
@@ -217,6 +224,15 @@ def apply_button(session: Session, text: str) -> str | None:
 
     _invalidate(session, changed)
     return None
+
+
+def _advance_addon_guest(s) -> None:
+    """Chuyển sang người kế tiếp để chọn add-on; hết người thì chốt (addons_decided)."""
+    n = s.party_size or 1
+    if s.addon_guest_idx < n - 1:
+        s.addon_guest_idx += 1
+    else:
+        s.addons_decided = True
 
 
 def _to_int(value: str) -> int | None:

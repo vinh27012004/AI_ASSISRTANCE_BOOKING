@@ -41,6 +41,7 @@ class StubApi:
         self.lookup_error = None
         self.create_error = None
         self.last_slots_kw = None
+        self.closed_dates = set()   # ISO ngày shop nghỉ -> get_therapists trả rỗng
         self.calls = []
 
     def get_shops(self):
@@ -61,7 +62,22 @@ class StubApi:
 
     def get_therapists(self, shop_id, date):
         self.calls.append("therapists")
+        if date in self.closed_dates:              # ngày shop nghỉ -> không có người trực
+            return {"therapists": []}
         return {"therapists": [{"id": 5, "name": "Hana", "gender": "female"}]}
+
+    def get_availability(self, shop_id, date_from, date_to):
+        self.calls.append("availability")
+        from datetime import date, timedelta
+        d0, d1 = date.fromisoformat(date_from), date.fromisoformat(date_to)
+        open_dates, closed_dates = [], []
+        d = d0
+        while d <= d1:
+            iso = d.isoformat()
+            (closed_dates if iso in self.closed_dates else open_dates).append(iso)
+            d += timedelta(days=1)
+        return {"from": date_from, "to": date_to,
+                "open_dates": open_dates, "closed_dates": closed_dates}
 
     def lookup_customer(self, phone):
         self.calls.append("lookup:" + phone)
@@ -142,12 +158,29 @@ def test_invalidate_on_course_change():
     """Đổi course (nút) -> xóa add-on + slot + confirm (add-on phụ thuộc course, BR-09)."""
     ses = Session(conversation_id="c", turn_count=1,
                   slots=Slots(shop_id=1, date="d", party_size=1, course_id=3,
-                              addons=[7], addons_decided=True, slot="14:00", confirm="yes"))
+                              guest_addons=[[7]], addons_decided=True, slot="14:00", confirm="yes"))
     sm.apply_button(ses, "course:9")
     check(ses.slots.course_id == 9, "course đổi sang 9")
-    check(ses.slots.addons == [] and ses.slots.addons_decided is False, "đổi course phải reset add-on")
+    check(ses.slots.guest_addons == [] and ses.slots.addons_decided is False, "đổi course phải reset add-on")
     check(ses.slots.slot is None, "đổi course phải xóa slot (BR-07)")
     check(ses.slots.confirm is None, "đổi đơn phải xóa confirm")
+
+
+def test_group_addons_per_person():
+    """BR-10: nhóm cùng course nhưng add-on RIÊNG từng người — hỏi lần lượt từng người."""
+    ses = Session(conversation_id="c", turn_count=1,
+                  slots=Slots(shop_id=1, date="d", party_size=3, course_id=3))
+    ses.slots.ensure_guest_addons()
+    check(sm.next_state(ses) == S.ADDON, "vào bước ADDON")
+    sm.apply_button(ses, "addon:7")           # người 1: add-on 7
+    check(ses.slots.addon_guest_idx == 0, "vẫn đang hỏi người 1")
+    sm.apply_button(ses, "addon:done")        # xong người 1 -> người 2
+    check(ses.slots.addon_guest_idx == 1 and not ses.slots.addons_decided, "chuyển sang người 2")
+    sm.apply_button(ses, "addon:none")        # người 2: không thêm -> người 3
+    check(ses.slots.addon_guest_idx == 2, "chuyển sang người 3")
+    sm.apply_button(ses, "addon:done")        # xong người 3 (cuối) -> chốt hết
+    check(ses.slots.addons_decided is True, "hỏi hết mọi người -> chốt")
+    check(ses.slots.guest_addons == [[7], [], []], "add-on lưu RIÊNG từng người")
 
 
 def test_addon_is_separate_step():
@@ -234,6 +267,95 @@ def test_language_selection_and_lock():
     check(ses.lang == "en" and ses.lang_locked is True, "đã chọn en -> giữ en dù gõ tiếng Việt")
 
 
+class _HallucinatingLLM:
+    """LLM giả trả số bịa — để chứng minh câu chứa số/mã KHÔNG đi qua LLM."""
+    def complete(self, *a, **k):
+        return "Please call the shop at 019-999-9999 or code 99999999-XX-XX 😊"
+
+
+def test_literal_renders_never_use_llm():
+    """END/HANDOFF/DONE... phải dùng số/mã THẬT từ data, không để LLM bịa (§10)."""
+    from app import nlg
+    from app.session import Session as Ses
+    llm = _HallucinatingLLM()
+
+    p = nlg.build_prompt("END", Ses(conversation_id="c", lang="vi"),
+                         {"message": "Số này bị chặn.", "shop_phone": "0258123456"}, "vi")
+    out = nlg.generate(p, llm)
+    check("0258123456" in out and "019-999-9999" not in out, "END: số điện thoại phải THẬT")
+
+    ses = Ses(conversation_id="c", lang="vi", booking_code="20260726-S001-AB12")
+    p2 = nlg.build_prompt("DONE", ses, {}, "vi")
+    out2 = nlg.generate(p2, llm)
+    check("20260726-S001-AB12" in out2 and "99999999" not in out2, "DONE: mã đặt chỗ phải THẬT")
+
+    # Câu hỏi thường (SHOP) vẫn được dùng LLM cho tự nhiên.
+    p3 = nlg.build_prompt("SHOP", Ses(conversation_id="c", lang="vi"), {"shops": []}, "vi")
+    check("019-999-9999" in nlg.generate(p3, llm), "SHOP (không số liệu nhạy cảm) vẫn qua LLM")
+
+
+def test_parse_date_freeform():
+    """Hiểu ngày gõ tự do: số trần '31', 'd/m', 'ngày D tháng M', kiểu Nhật, lăn tháng."""
+    from datetime import date
+    from app import nlu
+    t = date(2026, 7, 27)
+    check(nlu.parse_date_freeform("31", allow_bare_day=True, today=t) == "2026-07-31",
+          "số trần 31 (khi đang hỏi ngày) -> 31/7")
+    check(nlu.parse_date_freeform("5", allow_bare_day=True, today=t) == "2026-08-05",
+          "mùng 5 đã qua trong tháng -> lăn sang 5/8")
+    check(nlu.parse_date_freeform("31", allow_bare_day=False, today=t) is None,
+          "không bật bare_day -> số trần KHÔNG bị hiểu là ngày (tránh nhầm số người)")
+    check(nlu.parse_date_freeform("31/8", today=t) == "2026-08-31", "'31/8' -> 31 tháng 8")
+    check(nlu.parse_date_freeform("ngày 15 tháng 8", today=t) == "2026-08-15", "'ngày 15 tháng 8'")
+    check(nlu.parse_date_freeform("8月20日", today=t) == "2026-08-20", "kiểu Nhật 8月20日")
+    check(nlu.parse_date_freeform("2026-08-03", today=t) == "2026-08-03", "ISO giữ nguyên")
+    check(nlu.parse_date_freeform("mai", today=t) == "2026-07-28", "tương đối 'mai'")
+    check(nlu.parse_date_freeform("31/2", today=t) is None, "'31/2' vô lý -> None")
+    check(nlu.parse_date_freeform("99", allow_bare_day=True, today=t) is None, "'99' không phải ngày -> None")
+
+
+def test_date_freeform_reply_at_date_step():
+    """Đang hỏi NGÀY, khách gõ số trần '15' -> hiểu thành ngày, đi tiếp hỏi số người."""
+    api = StubApi()
+    orch = _orch(api)
+    orch.handle_turn("cdf", "")
+    r = orch.handle_turn("cdf", "shop:1")
+    check(r.state == S.DATE, f"sau shop -> hỏi ngày, đang {r.state}")
+    r = orch.handle_turn("cdf", "15")
+    ses = orch.store.load("cdf")
+    check(ses.slots.date is not None, "gõ '15' khi đang hỏi ngày -> đã hiểu thành ngày")
+    check(r.state == S.PARTY_SIZE, f"hiểu ngày xong -> hỏi số người, đang {r.state}")
+
+
+def test_date_buttons_show_active_only():
+    """Nút ngày chỉ hiện ngày shop THỰC SỰ có ca — ngày nghỉ bị loại (bug user báo)."""
+    from datetime import date, timedelta
+    api = StubApi()
+    today = date.today()
+    d0, d1 = today.isoformat(), (today + timedelta(days=1)).isoformat()
+    api.closed_dates = {d0, d1}                    # hôm nay & mai shop nghỉ
+    orch = _orch(api)
+    orch.handle_turn("cab", "")
+    r = orch.handle_turn("cab", "shop:1")
+    vals = [b["value"] for b in r.ui["buttons"]]
+    check(f"date:{d0}" not in vals and f"date:{d1}" not in vals, "ngày shop nghỉ KHÔNG hiện làm nút")
+    check(any(v.startswith("date:") for v in vals), "vẫn hiện các ngày còn mở")
+
+
+def test_shop_closed_all_days_routes_back_to_shop():
+    """Shop nghỉ suốt 2 tuần tới -> quay lại chọn cửa hàng khác (không kẹt ở bước ngày)."""
+    from datetime import date, timedelta
+    api = StubApi()
+    today = date.today()
+    api.closed_dates = {(today + timedelta(days=i)).isoformat()
+                        for i in range(Orchestrator._AVAIL_HORIZON_DAYS)}
+    orch = _orch(api)
+    orch.handle_turn("csc", "")
+    r = orch.handle_turn("csc", "shop:1")
+    check(r.state == S.SHOP, f"shop nghỉ hết -> quay lại chọn shop, đang {r.state}")
+    check(any(b["value"].startswith("shop:") for b in r.ui["buttons"]), "hiện lại nút chọn cửa hàng")
+
+
 def test_detect_lang_ignores_pii():
     """Gõ SĐT + email KHÔNG được coi là tiếng Anh (bug bot nhảy sang EN ở CONTACT)."""
     from app import nlu
@@ -293,6 +415,22 @@ def test_happy_path():
     check(api.created_body["party_size"] == 1 and api.created_body["course_id"] == 3,
           "happy: body đúng party_size/course")
     check(api.created_body["start_time"] == "14:00", "happy: body đúng giờ")
+
+
+def test_group_flow_addons_per_person():
+    """Nhóm 3 người, 1 course, add-on RIÊNG từng người -> body reservations khác nhau (BR-10)."""
+    api = StubApi()
+    orch = _orch(api)
+    r = _drive(orch, "cg",
+               "", "shop:1", f"date:{_FUTURE_DATE}", "party:3", "course:3",
+               "addon:7", "addon:done",     # người 1: add-on 7
+               "addon:none",                # người 2: không thêm
+               "addon:7", "addon:done",     # người 3: add-on 7
+               "slot:14:00", "0901234567 a@b.com", "confirm:yes")
+    check(r.state == S.DONE, f"nhóm đặt xong -> DONE, đang {r.state}")
+    res = [x["addon_ids"] for x in api.created_body["reservations"]]
+    check(res == [[7], [], [7]], "reservations add-on RIÊNG từng người (BR-10)")
+    check(api.created_body["party_size"] == 3, "đúng 3 người, cùng course")
 
 
 def test_a5_phone_blocked():

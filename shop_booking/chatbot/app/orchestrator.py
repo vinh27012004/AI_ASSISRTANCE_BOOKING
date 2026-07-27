@@ -30,6 +30,9 @@ class BotReply:
 
 
 class Orchestrator:
+    # Số ngày dò tới trước để biết cửa hàng THỰC SỰ có ca làm ngày nào (bước DATE).
+    _AVAIL_HORIZON_DAYS = 14
+
     def __init__(self, store: SessionStore, api: ShopApiClient,
                  llm: RealLLMClient | None, settings: Settings):
         self.store = store
@@ -37,6 +40,8 @@ class Orchestrator:
         self.llm = llm
         self.settings = settings
         self._shops_cache: tuple[float, list[dict]] | None = None
+        # shop_id -> (epoch, list[ISO ngày mở cửa). Cache 5' để khỏi dò lại mỗi lượt.
+        self._avail_cache: dict[int, tuple[float, list[str]]] = {}
 
     # ------------------------------------------------------------------ #
     #  Vòng 1 lượt                                                        #
@@ -94,6 +99,13 @@ class Orchestrator:
             # ② MERGE
             sm.merge_params(session, parsed["entities"])
 
+            # Đang hỏi NGÀY mà khách trả lời số trần ("31") hay "31/7" — NLU stateless bỏ số
+            # trần để khỏi nhầm với số người; ở đây có ngữ cảnh nên diễn giải thành ngày.
+            if session.state == S.DATE and session.slots.date is None:
+                iso = nlu.parse_date_freeform(user_text, allow_bare_day=True)
+                if iso:
+                    sm.merge_params(session, {"date": iso})
+
         # Nhóm >3 -> handoff (BR-14 / A8), không cần gọi BE.
         if session.slots.party_over:
             return self._handoff(session, reason_party=True)
@@ -117,18 +129,35 @@ class Orchestrator:
             if st == S.SHOP:
                 return {"shops": pii.mask_response(self._get_shops())}
 
+            if st == S.DATE:
+                # Nút ngày = ngày cửa hàng THỰC SỰ có ca (không mời ngày shop nghỉ). Không dò
+                # được (API lỗi) -> active=None, buttons tự lùi về hôm nay..+3.
+                active = self._available_dates(s.shop_id)
+                if active is not None and not active:         # shop không có ca suốt horizon
+                    s.shop_id = None                          # -> mời chọn cửa hàng khác
+                    session.state = S.SHOP
+                    return {"render_key": "ERROR",
+                            "message": "Cửa hàng này hiện chưa có lịch làm việc trong thời gian "
+                                       "tới. Anh/chị chọn giúp cửa hàng khác nhé.",
+                            "shops": pii.mask_response(self._get_shops())}
+                return {"active_dates": active}
+
             if st == S.COURSE:
                 data = self.api.get_services(s.shop_id, s.date, s.party_size)
                 if data.get("reason") == "SHOP_CLOSED":           # A1 (200 rỗng, không phải lỗi)
                     s.date = None
                     session.state = S.DATE
-                    return {"render_key": "ERROR",
-                            "message": "Cửa hàng không phục vụ ngày này, mời anh/chị chọn ngày khác."}
+                    active = self._available_dates(s.shop_id)
+                    msg = ("Cửa hàng không phục vụ ngày này. "
+                           + ("Anh/chị chọn giúp một trong các ngày có làm bên dưới nhé."
+                              if active else "Mời anh/chị chọn ngày khác."))
+                    return {"render_key": "ERROR", "message": msg, "active_dates": active}
                 self._match_course(session, data.get("courses", []))
                 self._cache_course(session, data.get("courses", []))
                 return {"courses": data.get("courses", [])}
 
-            if st == S.ADDON:                                     # bước RIÊNG: chọn add-on
+            if st == S.ADDON:                                     # bước RIÊNG: add-on từng người
+                s.ensure_guest_addons()                           # BR-10: mỗi người 1 danh sách
                 data = self.api.get_services(s.shop_id, s.date, s.party_size)
                 self._cache_course(session, data.get("courses", []))
                 return {"addons": data.get("addons", [])}
@@ -136,7 +165,9 @@ class Orchestrator:
             if st == S.SLOT:
                 data = self.api.get_slots(
                     s.shop_id, date=s.date, party_size=s.party_size, course_id=s.course_id,
-                    addon_ids=s.addons, therapist_id=s.therapist_id,
+                    # GET /slots chỉ nhận MỘT bộ add-on -> gửi HỢP của mọi người (giờ trống ước
+                    # lượng thận trọng); BE re-check add-on RIÊNG từng reservation lúc tạo.
+                    addon_ids=self._union_addons(session), therapist_id=s.therapist_id,
                     therapist_gender=s.therapist_gender,
                 )
                 slots = self._future_slots(data.get("slots", []), s.date)  # bỏ giờ đã qua (hôm nay)
@@ -197,8 +228,8 @@ class Orchestrator:
             session.state = S.CONFIRM
             return {}
 
-        addons_first = list(s.addons)                             # MVP: add-on gán người 1 (BR-10)
-        reservations = [{"addon_ids": addons_first if i == 0 else []}
+        s.ensure_guest_addons()                                   # BR-10: add-on RIÊNG từng người
+        reservations = [{"addon_ids": list(s.guest_addons[i])}
                         for i in range(s.party_size or 1)]
         body = {
             "shop_id": s.shop_id,
@@ -233,8 +264,8 @@ class Orchestrator:
             session.state = S.CONFIRM
             return {}
 
-        addons_first = list(s.addons)                              # BR-10: add-on gán người 1
-        reservations = [{"addon_ids": addons_first if i == 0 else []}
+        s.ensure_guest_addons()                                    # BR-10: add-on RIÊNG từng người
+        reservations = [{"addon_ids": list(s.guest_addons[i])}
                         for i in range(s.party_size or 1)]
         body = {
             "date": s.date, "start_time": s.slot, "party_size": s.party_size,
@@ -316,9 +347,12 @@ class Orchestrator:
         if code == "INVALID_COMBO":                                # A3 — combo course+add-on cấm
             session.state = S.ADDON
             s.addons_decided = False
+            s.addon_guest_idx = 0
             bad = d.get("addon_id")
-            if bad in s.addons:
-                s.addons.remove(bad)                               # bỏ add-on gây cấm
+            if bad is not None:                                    # gỡ add-on gây cấm khỏi mọi người
+                for guest in s.guest_addons:
+                    if bad in guest:
+                        guest.remove(bad)
             return {"render_key": "ERROR", "message": e.message}
 
         if code == "ADDON_WITHOUT_COURSE":                         # BR-01 — có add-on mà thiếu course
@@ -362,11 +396,12 @@ class Orchestrator:
     #  Màn chào — mời chọn ngôn ngữ (khỏi đoán, §7)                       #
     # ------------------------------------------------------------------ #
     def _greeting(self, session: Session) -> BotReply:
-        # Câu chào cố định 3 thứ tiếng (không qua LLM để không tự đoán ngôn ngữ).
+        # Câu chào cố định 3 thứ tiếng (không qua LLM để không tự đoán ngôn ngữ). Nói rõ đây
+        # là trợ lý AI ngay từ đầu — yêu cầu minh bạch APPI (§6.3.4).
         text = (
-            "Xin chào 👋 Vui lòng chọn ngôn ngữ.\n"
-            "Hello! Please choose your language.\n"
-            "こんにちは！言語をお選びください。"
+            "Xin chào 👋 Em là trợ lý đặt lịch AI. Vui lòng chọn ngôn ngữ.\n"
+            "Hi! I'm the AI booking assistant. Please choose your language.\n"
+            "こんにちは！AI予約アシスタントです。言語をお選びください。"
         )
         buttons = [
             {"label": "Tiếng Việt", "value": "lang:vi"},
@@ -472,6 +507,16 @@ class Orchestrator:
         return out
 
     @staticmethod
+    def _union_addons(session: Session) -> list[int]:
+        """Hợp add-on của mọi người — gửi cho GET /slots (chỉ nhận 1 bộ). Giữ thứ tự, bỏ trùng."""
+        seen: list[int] = []
+        for guest in session.slots.guest_addons:
+            for a in guest:
+                if a not in seen:
+                    seen.append(a)
+        return seen
+
+    @staticmethod
     def _cache_course(session: Session, courses: list[dict]) -> None:
         """Lưu tên + thời lượng course đã chọn để đọc lại ở CONFIRM (không cần gọi API lần nữa)."""
         cid = session.slots.course_id
@@ -517,6 +562,32 @@ class Orchestrator:
         shops = self.api.get_shops()
         self._shops_cache = (now, shops)
         return shops
+
+    def _available_dates(self, shop_id: int | None) -> list[str] | None:
+        """Các ngày cửa hàng THỰC SỰ có ca làm trong ~2 tuần tới (mở = có ca, cùng tín hiệu
+        has_shifts của GET /services). Lấy trong MỘT lần gọi GET /shops/{id}/availability.
+
+        Trả list ISO (có thể RỖNG = shop nghỉ suốt horizon) khi gọi được; None khi lỗi API
+        để nút ngày lùi về mặc định thay vì tưởng shop đóng cửa. Cache 5'/shop."""
+        if not shop_id:
+            return None
+        from datetime import date as _date, timedelta as _td
+
+        now = time.time()
+        cached = self._avail_cache.get(shop_id)
+        if cached and now - cached[0] < 300:
+            return cached[1]
+
+        today = _date.today()
+        to = today + _td(days=self._AVAIL_HORIZON_DAYS - 1)
+        try:
+            data = self.api.get_availability(shop_id, today.isoformat(), to.isoformat())
+        except ShopApiError:
+            return None                         # không rõ -> để buttons dùng ngày mặc định
+
+        open_days = data.get("open_dates") or []
+        self._avail_cache[shop_id] = (now, open_days)
+        return open_days
 
     def _shop_phone(self, session: Session) -> str:
         if session.shop_phone:

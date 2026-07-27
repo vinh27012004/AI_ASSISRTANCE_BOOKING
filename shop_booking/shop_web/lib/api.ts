@@ -5,6 +5,7 @@ import type {
   BookingUpdateRequest,
   CustomerInfo,
   Gender,
+  AvailabilityResponse,
   ServicesResponse,
   Shop,
   SlotsResponse,
@@ -198,6 +199,18 @@ export const api = {
       party_size: String(params.partySize),
     });
     return request<ServicesResponse>(`/shops/${shopId}/services?${qs}`, {
+      signal,
+    });
+  },
+
+  /** Ngày shop mở/đóng trong [from,to] — lịch gạch sẵn ngày nghỉ (case A1). */
+  availability(
+    shopId: number,
+    params: { from: string; to: string },
+    signal?: AbortSignal,
+  ) {
+    const qs = new URLSearchParams({ from: params.from, to: params.to });
+    return request<AvailabilityResponse>(`/shops/${shopId}/availability?${qs}`, {
       signal,
     });
   },
