@@ -117,9 +117,7 @@ def _invalidate(session: Session, changed: set[str]) -> None:
     # Đổi course (add-on cũ chưa chắc còn kèm được — BR-09) hoặc đổi số người (cấu trúc
     # add-on theo từng người thay đổi) -> chọn lại add-on từ đầu.
     if changed & {"course_id", "party_size"}:
-        s.guest_addons = []
-        s.addons_decided = False
-        s.addon_guest_idx = 0
+        _reset_addons(s)
     if "course_id" in changed:
         s.course_name = None
     # BR-07: đổi course/party/date -> slot cũ chưa chắc còn hợp lệ, buộc chọn lại.
@@ -168,11 +166,16 @@ def apply_button(session: Session, text: str) -> str | None:
         if value == "slot":
             s.slot = None; s.confirm = None
         elif value == "party":
+            # Đổi số người -> cấu trúc add-on theo TỪNG người đổi, phải chọn lại từ đầu (BR-10);
+            # nhóm ≥2 không được chỉ định therapist (BR-04) nên bỏ luôn chỉ định.
             s.party_size = None; s.slot = None; s.confirm = None
             s.therapist_id = None; s.therapist_gender = None; s.therapist_decided = False
+            _reset_addons(s)
         elif value == "course":
+            # Đổi course -> add-on cũ chưa chắc còn kèm được (BR-09), chọn lại từ đầu.
+            # (trước đây gán s.addons=[] — Slots KHÔNG có field đó, add-on không hề được reset.)
             s.course_id = None; s.course_name = None
-            s.addons = []; s.addons_decided = False
+            _reset_addons(s)
             s.slot = None; s.confirm = None
         return None
     if key == "cancel" and value == "start":
@@ -224,6 +227,14 @@ def apply_button(session: Session, text: str) -> str | None:
 
     _invalidate(session, changed)
     return None
+
+
+def _reset_addons(s) -> None:
+    """Xóa toàn bộ trạng thái chọn add-on -> hỏi lại từ người 1 (BR-10). Dùng khi đổi
+    course/số người, kể cả lúc sửa lịch."""
+    s.guest_addons = []
+    s.addons_decided = False
+    s.addon_guest_idx = 0
 
 
 def _advance_addon_guest(s) -> None:

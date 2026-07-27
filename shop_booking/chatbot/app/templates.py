@@ -16,7 +16,7 @@ INSTRUCTION = {
     "DATE": "Hỏi khách muốn đặt vào ngày nào.",
     "PARTY_SIZE": "Hỏi đặt cho mấy người, nhắc tối đa 3 người mỗi lượt.",
     "COURSE": "Hỏi khách chọn course chính (mỗi course đã kèm sẵn thời lượng).",
-    "ADDON": "Hỏi khách có muốn thêm add-on không (add-on cấm đã ẩn, có thể bỏ qua). Nếu đặt NHÓM thì hỏi RIÊNG cho từng người — facts.nhac_nguoi cho biết đang hỏi người thứ mấy; mỗi người add-on có thể khác nhau (BR-10).",
+    "ADDON": "(Render TẤT ĐỊNH — soạn ở nlg._addon_prompt_line, không qua LLM.) Hỏi add-on RIÊNG từng người (BR-10), xác nhận lựa chọn đã chọn, hướng khách bấm nút đi tiếp.",
     "SLOT": "Mời khách chọn khung giờ (các giờ hiện bằng nút); nói thêm khách có thể nhập giờ cụ thể mong muốn nếu chưa thấy giờ ưng ý.",
     "THERAPIST": "Hỏi khách có muốn chỉ định nhân viên (theo tên hoặc giới tính) hay để cửa hàng sắp.",
     "CONTACT": "Xin thông tin liên hệ CÒN THIẾU (đúng theo facts.hoi) để giữ chỗ và gửi mã đặt chỗ. Nếu khách đã cho số điện thoại rồi thì CHỈ hỏi email, đừng hỏi lại số.",
@@ -58,10 +58,12 @@ FAKE = {
         "en": "Please pick a main course.",
         "ja": "メインコースをお選びください。",
     },
+    # Câu soạn động trong nlg._addon_prompt_line (xác nhận đã chọn + chỉ tới nút ✅). ADDON ở
+    # _LITERAL_SAFE_KEYS nên luôn dùng câu này, không qua LLM.
     "ADDON": {
-        "vi": "{nhac_nguoi}Anh/chị có muốn thêm dịch vụ bổ sung nào không ạ? Nếu không thì bấm “Không thêm”.",
-        "en": "{nhac_nguoi}Any add-ons? Tap “No add-on” to skip.",
-        "ja": "{nhac_nguoi}追加オプションはいかがですか？不要なら「追加なし」を押してください。",
+        "vi": "{addon_line}",
+        "en": "{addon_line}",
+        "ja": "{addon_line}",
     },
     "SLOT": {
         "vi": "Các khung giờ còn trống: {slots}. Anh/chị chọn giờ nào ạ? (hoặc nhập giờ cụ thể mong muốn)",

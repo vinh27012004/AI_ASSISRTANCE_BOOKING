@@ -491,6 +491,109 @@ def test_cancel_in_session():
     check(reply.state == S.CANCELLED and reply.done is True, "cancel: state CANCELLED, done")
 
 
+def test_modify_party_and_course_reset_addons():
+    """Sửa số người / đổi course phải XÓA add-on cũ (BR-10). Trước đây modify:course gán
+    s.addons=[] (field không tồn tại) nên add-on không hề reset — nay reset đúng."""
+    def _booked_group():
+        return Session(conversation_id="c", turn_count=1, booking_code="X", editing=False,
+                       slots=Slots(shop_id=1, date="d", party_size=2, course_id=3,
+                                   guest_addons=[[7], [8]], addons_decided=True, addon_guest_idx=1))
+
+    ses = _booked_group()
+    sm.apply_button(ses, "modify:party")
+    s = ses.slots
+    check(s.party_size is None, "modify:party xóa số người")
+    check(s.guest_addons == [] and s.addons_decided is False and s.addon_guest_idx == 0,
+          "modify:party reset add-on về người 1")
+
+    ses2 = _booked_group()
+    sm.apply_button(ses2, "modify:course")
+    s2 = ses2.slots
+    check(s2.course_id is None, "modify:course xóa course")
+    check(s2.guest_addons == [] and s2.addons_decided is False and s2.addon_guest_idx == 0,
+          "modify:course reset add-on đúng field (không còn set nhầm s.addons)")
+
+
+def test_addon_group_prompt_shows_person_index():
+    """Câu hỏi add-on khi đặt NHÓM phải nêu rõ 'Người n/m' — không để LLM bỏ mất (khiến
+    người 2 nhìn giống hỏi lại người 1)."""
+    from app import nlg
+    from app.session import Session as Ses, Slots as Sl
+    ses = Ses(conversation_id="c", lang="vi",
+              slots=Sl(party_size=2, course_id=3, guest_addons=[[7], []], addon_guest_idx=1))
+    p = nlg.build_prompt("ADDON", ses, {"addons": []}, "vi")
+    out = nlg.generate(p, _HallucinatingLLM())     # dù có LLM, ADDON vẫn ép template tất định
+    check("Người 2/2" in out, "ADDON nhóm phải nêu rõ đang hỏi Người 2/2")
+
+
+def test_addon_prompt_confirms_and_single_next_button():
+    """Sau khi chọn add-on: câu XÁC NHẬN 'Đã chọn …' + ĐÚNG MỘT nút đi tiếp (khỏi kẹt toggle)."""
+    from app import nlg
+    from app.buttons import buttons_for
+    from app.session import Session as Ses, Slots as Sl
+    ar = {"addons": [{"id": 7, "name": "Aroma Oil", "duration_min": 30, "price": 1500,
+                      "restricted_course_ids": []}]}
+
+    # Đã chọn add-on cho người 1/3
+    ses = Ses(conversation_id="c", lang="vi",
+              slots=Sl(party_size=3, course_id=3, guest_addons=[[7], [], []], addon_guest_idx=0))
+    out = nlg.generate(nlg.build_prompt("ADDON", ses, ar, "vi"), None)
+    check("Đã chọn" in out and "Aroma Oil" in out, "đã chọn -> câu xác nhận có tên add-on")
+    nexts = [b for b in buttons_for(S.ADDON, ses, ar) if b["value"] in ("addon:done", "addon:none")]
+    check(len(nexts) == 1 and nexts[0]["value"] == "addon:done", "đã chọn -> đúng 1 nút = addon:done")
+    check("người 1" in nexts[0]["label"], "nhãn nút nêu rõ người 1")
+
+    # Chưa chọn gì -> nút bỏ qua duy nhất
+    ses2 = Ses(conversation_id="c", lang="vi",
+               slots=Sl(party_size=3, course_id=3, guest_addons=[[], [], []], addon_guest_idx=0))
+    nexts2 = [b for b in buttons_for(S.ADDON, ses2, ar) if b["value"] in ("addon:done", "addon:none")]
+    check(len(nexts2) == 1 and nexts2[0]["value"] == "addon:none", "chưa chọn -> đúng 1 nút = addon:none")
+
+
+def test_modify_party_in_session():
+    """Sửa số người 1->2 trong phiên: hỏi lại add-on RIÊNG từng người rồi PATCH đúng (BR-10)."""
+    api = StubApi()
+    orch = _orch(api)
+    _drive(orch, "cmp", *_HAPPY)                       # đặt 1 người xong
+    orch.handle_turn("cmp", "modify:start")
+    orch.handle_turn("cmp", "modify:party")
+    r = orch.handle_turn("cmp", "party:2")
+    check(r.state == S.ADDON, f"đổi số người -> hỏi lại add-on, đang {r.state}")
+    orch.handle_turn("cmp", "addon:7")                 # người 1: add-on 7
+    orch.handle_turn("cmp", "addon:done")              # xong người 1 -> người 2
+    r = orch.handle_turn("cmp", "addon:none")          # người 2: không thêm -> chốt
+    check(r.state == S.SLOT, f"chốt add-on 2 người -> chọn giờ, đang {r.state}")
+    orch.handle_turn("cmp", "slot:14:15")
+    r = orch.handle_turn("cmp", "confirm:yes")
+    check(api.patched_body is not None, "modify party: phải gọi PATCH")
+    check(api.patched_body["party_size"] == 2, "PATCH đúng 2 người")
+    check([x["addon_ids"] for x in api.patched_body["reservations"]] == [[7], []],
+          "PATCH add-on RIÊNG từng người sau khi sửa số người (BR-10)")
+    check(r.state == S.DONE, "modify party xong -> DONE")
+
+
+def test_modify_keep_returns_to_done():
+    """'Giữ nguyên' ở menu sửa -> về DONE, tắt editing, KHÔNG ghi gì."""
+    api = StubApi()
+    orch = _orch(api)
+    _drive(orch, "ck", *_HAPPY)
+    orch.handle_turn("ck", "modify:start")
+    r = orch.handle_turn("ck", "modify:keep")
+    check(r.state == S.DONE, f"'Giữ nguyên' -> quay lại DONE, đang {r.state}")
+    check(orch.store.load("ck").editing is False, "modify:keep tắt cờ editing")
+    check(api.patched_body is None, "modify:keep KHÔNG gọi PATCH")
+
+
+def test_cancel_by_text():
+    """Hủy bằng LỜI sau khi đặt xong (không bấm nút) -> cancel với email thật (UC-03)."""
+    api = StubApi()
+    orch = _orch(api)
+    _drive(orch, "ct", *_HAPPY)
+    r = orch.handle_turn("ct", "hủy lịch giúp tôi")
+    check(api.cancelled_with == "a@b.com", "hủy bằng lời -> cancel email THẬT")
+    check(r.state == S.CANCELLED and r.done is True, "hủy bằng lời -> CANCELLED")
+
+
 def run_all():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for t in tests:

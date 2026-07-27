@@ -43,7 +43,9 @@ def build_prompt(state_key: str, session: Session, api_result: dict, lang: str) 
 # Câu chứa số/mã THẬT mà LLM có thể sửa/bịa (shop_phone, booking_code, giờ trống) -> LUÔN
 # dùng template code, KHÔNG qua LLM (§10: cấm LLM tự sinh số liệu; số trong nút do code tạo,
 # text phải khớp). Đa ngôn ngữ vẫn giữ vì template đã tách vi/en/ja.
-_LITERAL_SAFE_KEYS = {"SLOT", "END", "HANDOFF", "ERROR", "DONE", "UPDATED", "CANCELLED"}
+# ADDON: khi đặt NHÓM, câu phải nêu ĐANG hỏi "Người n/m" (BR-10) — để LLM diễn đạt thì nó
+# hay bỏ mất chỉ số này, khiến người 2 nhìn giống hỏi lại người 1. Ép template tất định.
+_LITERAL_SAFE_KEYS = {"SLOT", "ADDON", "END", "HANDOFF", "ERROR", "DONE", "UPDATED", "CANCELLED"}
 
 
 def generate(prompt: dict, llm: RealLLMClient | None) -> str:
@@ -79,11 +81,9 @@ def _facts_for(state_key: str, session: Session, api_result: dict) -> dict:
             for c in ar.get("courses", [])
         ]
     elif state_key == "ADDON":
-        facts["add_on"] = [
-            f'{a.get("name")} · {a.get("duration_min")} phút · {a.get("price")}¥'
-            for a in ar.get("addons", [])
-        ]
-        facts["nhac_nguoi"] = _addon_guest_prefix(session)   # "Người n/m: " khi đặt nhóm
+        # Câu ĐỘNG: đã chọn add-on cho người này -> XÁC NHẬN + chỉ tới nút ✅; chưa chọn ->
+        # mời chọn. Tránh lặp câu y hệt sau mỗi lần chọn (khách tưởng bị treo, bấm toggle mãi).
+        facts["addon_line"] = _addon_prompt_line(session, ar)
     elif state_key == "THERAPIST":
         facts["nhan_vien"] = [
             f'{t.get("name")} ({"nữ" if t.get("gender") == "female" else "nam"})'
@@ -104,6 +104,32 @@ def _facts_for(state_key: str, session: Session, api_result: dict) -> dict:
         facts["message"] = ar.get("message", "")
         facts["shop_phone"] = ar.get("shop_phone") or session.shop_phone or ""
     return facts
+
+
+_ADDON_LINES = {
+    # (đã_chọn, chưa_chọn) — {p}=tiền tố "Người n/m: ", {n}=tên add-on đã chọn
+    "vi": ("{p}Đã chọn: {n}. Bấm nút ✅ bên dưới để sang bước tiếp, hoặc chọn thêm / bỏ chọn add-on.",
+           "{p}Anh/chị muốn thêm dịch vụ bổ sung nào không ạ? Chạm để chọn (được nhiều), hoặc bấm “Không thêm” để bỏ qua."),
+    "en": ("{p}Selected: {n}. Tap the ✅ button below to continue, or add/remove more.",
+           "{p}Any add-ons? Tap to select (you can pick several), or “No add-on” to skip."),
+    "ja": ("{p}選択中：{n}。下の✅ボタンで次へ進むか、追加・解除できます。",
+           "{p}追加オプションはいかがですか？タップで選択（複数可）、不要なら「追加なし」を押してください。"),
+}
+
+
+def _addon_prompt_line(session: Session, api_result: dict) -> str:
+    """Câu hỏi add-on cho NGƯỜI hiện tại, có xác nhận lựa chọn (BR-10). Đây là câu tất định
+    (ADDON ở _LITERAL_SAFE_KEYS) nên soạn trọn ở đây, khỏi lệ thuộc LLM."""
+    s = session.slots
+    lang = session.lang if session.lang in _ADDON_LINES else "vi"
+    tong = s.party_size or 1
+    idx = min(s.addon_guest_idx, max(tong, 1) - 1)
+    sel_ids = s.guest_addons[idx] if idx < len(s.guest_addons) else []
+    id2name = {a.get("id"): a.get("name") for a in (api_result or {}).get("addons", [])}
+    names = ", ".join(id2name.get(i, "?") for i in sel_ids)
+    sel_t, empty_t = _ADDON_LINES[lang]
+    prefix = _addon_guest_prefix(session)
+    return sel_t.format(p=prefix, n=names) if sel_ids else empty_t.format(p=prefix)
 
 
 def _addon_guest_prefix(session: Session) -> str:

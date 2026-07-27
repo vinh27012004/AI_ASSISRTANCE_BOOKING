@@ -54,16 +54,21 @@ def buttons_for(state: str, session: Session, api_result: dict) -> list[dict]:
         idx = min(s.addon_guest_idx, len(s.guest_addons) - 1)
         chosen = s.course_id
         selected = set(s.guest_addons[idx])
+        n = s.party_size or 1
         out: list[dict] = []
         for a in ar.get("addons", []):
             if chosen and chosen in a.get("restricted_course_ids", []):
                 continue
             mark = "✓ " if a["id"] in selected else "+ "
             out.append({"label": f"{mark}{a['name']} · {a['duration_min']}'", "value": f"addon:{a['id']}"})
-        out.append({"label": "Không thêm", "value": "addon:none"})
+        # ĐÚNG MỘT nút đi tiếp (không để lẫn "Không thêm" + "Xong" cùng lúc → khách khỏi kẹt
+        # bấm toggle mãi): đã chọn -> "✅ Xong[ người k] →" (giữ lựa chọn); chưa chọn -> "Không
+        # thêm[ người k] →" (bỏ qua người này). Kèm số người khi đặt nhóm cho rõ đang ở đâu.
+        who = f" người {idx + 1}" if n > 1 else ""
         if selected:
-            last = idx >= (s.party_size or 1) - 1
-            out.append({"label": "Xong" if last else "Người tiếp theo →", "value": "addon:done"})
+            out.append({"label": f"✅ Xong{who} →", "value": "addon:done"})
+        else:
+            out.append({"label": f"Không thêm{who} →", "value": "addon:none"})
         return out
 
     if state == S.SLOT:
