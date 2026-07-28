@@ -62,6 +62,10 @@ class Session:
     edit_token: Optional[str] = None
     edit_token_expires_at: Optional[float] = None   # epoch giây
     editing: bool = False                           # đang sửa lịch đã đặt (UC-02, dùng UPDATE thay CREATE)
+    # Sau cửa sổ nhanh 2' (vault đã rút PII), sửa/hủy cần khách nhập LẠI email để xác thực
+    # (BR-15). Hai field này ghi nhớ "đang chờ email" và để làm gì.
+    awaiting_edit_email: bool = False
+    edit_email_for: str = ""                        # "update" | "cancel"
     shop_phone: Optional[str] = None                # cache để handoff (A5/A8)
     history: list[dict[str, str]] = field(default_factory=list)   # [{role, masked_text}]
     turn_count: int = 0

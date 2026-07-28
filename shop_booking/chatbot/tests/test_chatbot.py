@@ -6,6 +6,7 @@ Bước ③④⑤ là code -> assert state kế + tool được gọi; LLM ở �
 
 import os
 import sys
+import time
 from datetime import date, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -42,6 +43,8 @@ class StubApi:
         self.create_error = None
         self.last_slots_kw = None
         self.closed_dates = set()   # ISO ngày shop nghỉ -> get_therapists trả rỗng
+        self.blocked_phones = set() # SĐT bị chặn NG (A5) — chặn theo từng số
+        self.booking_email = None   # email của booking (để xác thực sửa/hủy bằng email — BR-15)
         self.calls = []
 
     def get_shops(self):
@@ -81,6 +84,9 @@ class StubApi:
 
     def lookup_customer(self, phone):
         self.calls.append("lookup:" + phone)
+        if phone in self.blocked_phones:
+            raise ShopApiError(403, "PHONE_BLOCKED", "SĐT bị chặn.",
+                               {"reason": "x", "shop_phone": "090-1111"})
         if self.lookup_error:
             raise self.lookup_error
         return {"member_type": "guest", "rank": None, "visit_count": 0}
@@ -90,26 +96,36 @@ class StubApi:
         if self.create_error:
             raise self.create_error
         self.created_body = body
+        self.booking_email = body.get("email")     # nhớ email để xác thực sửa/hủy bằng email
         return {"booking_code": "20260723-S001-AB12", "status": "confirmed",
                 "edit_token": "tok", "edit_token_expires_in": 120}
 
+    def _check_email(self, email):
+        # BR-15: xác thực bằng email -> email KHÔNG khớp thì BE trả 404 BOOKING_NOT_FOUND.
+        if self.booking_email is not None and email != self.booking_email:
+            raise ShopApiError(404, "BOOKING_NOT_FOUND",
+                               "Không tìm thấy đặt chỗ. Vui lòng kiểm tra lại mã đặt chỗ và email.")
+
     def patch_booking(self, booking_code, body, edit_token=None):
         self.calls.append("patch:" + booking_code)
+        if edit_token is None:                     # đường email (BR-15), không phải X-Edit-Token
+            self._check_email(body.get("email"))
         self.patched_body = body
         return {"booking_code": booking_code, "status": "confirmed"}
 
     def cancel_booking(self, booking_code, email):
         self.calls.append("cancel:" + booking_code)
+        self._check_email(email)
         self.cancelled_with = email
         return {"booking_code": booking_code, "status": "cancelled"}
 
 
-def _settings():
+def _settings(support_phone=""):
     return Settings(
         shop_api_base_url="http://x/api/v1",
         llm_base_url="", llm_api_key="", llm_model="m",
         redis_url="", session_ttl_seconds=1800, vault_enc_key="",
-        fallback_shop_phone="090-9999",
+        fallback_shop_phone="", support_phone=support_phone,
     )
 
 
@@ -122,6 +138,14 @@ def _drive(orch, cid, *messages):
     for m in messages:
         reply = orch.handle_turn(cid, m)
     return reply
+
+
+def _expire_edit_window(orch, cid):
+    """Mô phỏng đã quá cửa sổ nhanh 2': token hết hạn + vault đã bị rút PII (Q5)."""
+    ses = orch.store.load(cid)
+    ses.edit_token_expires_at = time.time() - 1
+    ses.vault = {}
+    orch.store.save(ses)
 
 
 # --------------------------------------------------------------------------- #
@@ -441,9 +465,10 @@ def test_a5_phone_blocked():
     reply = _drive(orch, "c2",
                    "", "shop:1", f"date:{_FUTURE_DATE}", "party:1",
                    "course:3", "addon:none", "therapist:skip", "slot:14:00", "0901234567 a@b.com")
-    check(reply.state == S.END, f"A5: state phải END, đang {reply.state}")
+    # A5 chặn theo TỪNG số -> cho thử số khác (quay lại CONTACT), KHÔNG kết thúc/đặt.
+    check(reply.state == S.CONTACT, f"A5: cho thử số khác (CONTACT), đang {reply.state}")
     check(api.created_body is None, "A5: KHÔNG được tạo booking")
-    check("090-1111" in reply.reply_text, "A5: phải đưa số cửa hàng")
+    check("090-1111" in reply.reply_text, "A5: đưa số hỗ trợ")
 
 
 def test_a6_slot_conflict():
@@ -592,6 +617,180 @@ def test_cancel_by_text():
     r = orch.handle_turn("ct", "hủy lịch giúp tôi")
     check(api.cancelled_with == "a@b.com", "hủy bằng lời -> cancel email THẬT")
     check(r.state == S.CANCELLED and r.done is True, "hủy bằng lời -> CANCELLED")
+
+
+class _NonJsonLLM:
+    """Router 'nói' thay vì trích JSON — mô phỏng LLM lờ chỉ dẫn 'chỉ trả JSON'."""
+    def complete(self, *a, **k):
+        return "Dạ được ạ, em đặt lịch cho anh/chị ngay!"
+
+
+def test_nlu_falls_back_when_llm_not_json():
+    """LLM trả text thường -> KHÔNG trả None (khỏi REPROMPT oan); rule-based bắt được ý."""
+    from app import nlu
+    parsed = nlu.extract("đồng ý đặt", "vi", _NonJsonLLM())
+    check(parsed is not None, "router trả text -> extract vẫn có kết quả (không None)")
+    check(parsed["entities"]["confirm"] == "yes", "rule-based bắt 'đồng ý' -> confirm=yes")
+
+
+def test_confirm_by_text_when_llm_flaky_books():
+    """Ở CONFIRM, gõ 'đồng ý đặt' khi router hỏng (trả text) -> vẫn đặt được, không REPROMPT."""
+    api = StubApi()
+    orch = Orchestrator(InMemorySessionStore(), api, _NonJsonLLM(), _settings())
+    _drive(orch, "cflaky", "", "shop:1", f"date:{_FUTURE_DATE}", "party:1",
+           "course:3", "addon:none", "therapist:skip", "slot:14:00", "0901234567 a@b.com")
+    r = orch.handle_turn("cflaky", "đồng ý đặt")
+    check(api.created_body is not None, "xác nhận bằng lời (LLM hỏng) vẫn đặt được")
+    check(r.state == S.DONE, f"-> DONE, đang {r.state}")
+
+
+def test_support_phone_env_takes_priority():
+    """Số hỗ trợ/CSKH ở env được ưu tiên khi chặn NG (A5), thay số cửa hàng do BE trả."""
+    api = StubApi()
+    api.lookup_error = ShopApiError(403, "PHONE_BLOCKED", "SĐT bị chặn.",
+                                    {"reason": "x", "shop_phone": "090-1111"})
+    orch = Orchestrator(InMemorySessionStore(), api, None, _settings(support_phone="1900-6068"))
+    reply = _drive(orch, "csp", "", "shop:1", f"date:{_FUTURE_DATE}", "party:1",
+                   "course:3", "addon:none", "therapist:skip", "slot:14:00", "0901234567 a@b.com")
+    check(reply.state == S.CONTACT, "A5 -> cho thử số khác (CONTACT)")
+    check("1900-6068" in reply.reply_text, "hiện số hỗ trợ env")
+    check("090-1111" not in reply.reply_text, "không hiện số cửa hàng khi đã có số hỗ trợ env")
+
+
+def test_a5_retry_with_another_phone_books():
+    """Số bị chặn -> nhập SỐ KHÁC (không nhập lại email) -> đặt được; email giữ nguyên, KHÔNG
+    gửi placeholder rác (bug user: bấm 'Đồng ý đặt' vẫn 'chưa hiểu rõ')."""
+    api = StubApi()
+    api.blocked_phones = {"0779776153"}
+    orch = _orch(api)
+    _drive(orch, "cr", "", "shop:1", f"date:{_FUTURE_DATE}", "party:1",
+           "course:3", "addon:none", "therapist:skip", "slot:14:00",
+           "phamvinh324@gmail.com 0779776153")          # email + số bị chặn
+    ses = orch.store.load("cr")
+    check(ses.state == S.CONTACT, f"số bị chặn -> xin số khác (CONTACT), đang {ses.state}")
+    check(ses.slots.email is not None and ses.vault, "email + vault CÒN nguyên (không bị rút)")
+    orch.handle_turn("cr", "0779776154")                # SỐ KHÁC, không nhập lại email
+    r = orch.handle_turn("cr", "confirm:yes")
+    check(api.created_body is not None, "số khác không bị chặn -> đặt được")
+    check(api.created_body["phone"] == "0779776154", "gửi đúng số mới")
+    check(api.created_body["email"] == "phamvinh324@gmail.com",
+          "email THẬT (không phải '{{email_1}}')")
+    check(r.state == S.DONE, "đặt xong -> DONE")
+
+
+def test_create_guard_reasks_when_pii_stale():
+    """Chốt chặn: PII placeholder không giải được (vault rút) -> KHÔNG gửi rác cho BE, xin lại."""
+    api = StubApi()
+    orch = _orch(api)
+    ses = Session(conversation_id="cg", turn_count=1,
+                  slots=Slots(shop_id=1, date=_FUTURE_DATE, party_size=1, course_id=3,
+                              addons_decided=True, slot="14:00", therapist_decided=True,
+                              phone="{{phone_1}}", email="{{email_1}}",
+                              contact_verified=True, confirm="yes"))
+    ses.vault = {"{{phone_1}}": "0901234567"}            # email_1 KHÔNG có trong vault
+    res = orch._create_booking(ses)
+    check(api.created_body is None, "không gửi booking khi email placeholder chưa giải được")
+    check(ses.state == S.CONTACT, "quay lại CONTACT xin lại liên hệ")
+    check(ses.slots.email is None, "reset email để hỏi lại; giữ phone đã giải được")
+
+
+def test_modify_after_2min_reasks_email_then_updates():
+    """Sửa lịch SAU cửa sổ 2' (vault đã rút) -> xin lại email để xác thực rồi PATCH (BR-15)."""
+    api = StubApi()
+    orch = _orch(api)
+    _drive(orch, "c2m", *_HAPPY)                       # đặt xong
+    _expire_edit_window(orch, "c2m")                   # quá 2', vault rút
+    orch.handle_turn("c2m", "modify:start")
+    orch.handle_turn("c2m", "modify:slot")             # đổi giờ
+    orch.handle_turn("c2m", "slot:14:15")
+    r = orch.handle_turn("c2m", "confirm:yes")         # token hết + vault rút -> xin email
+    check(api.patched_body is None, "chưa PATCH khi chưa có email")
+    check("email" in r.reply_text.lower(), "phải xin lại email để xác thực")
+    check(orch.store.load("c2m").awaiting_edit_email is True, "đang chờ email")
+    r = orch.handle_turn("c2m", "a@b.com")             # khách nhập lại email
+    check(api.patched_body is not None, "có email -> PATCH")
+    check(api.patched_body["start_time"] == "14:15", "PATCH đúng giờ mới")
+    check(api.patched_body.get("email") == "a@b.com", "PATCH kèm email xác thực (BR-15)")
+    check(r.state == S.DONE, "sửa xong -> DONE")
+
+
+def test_cancel_after_2min_reasks_email():
+    """Hủy lịch SAU cửa sổ 2' -> xin lại email rồi hủy (không đẩy sang trang Quản lý)."""
+    api = StubApi()
+    orch = _orch(api)
+    _drive(orch, "c2c", *_HAPPY)
+    _expire_edit_window(orch, "c2c")
+    r = orch.handle_turn("c2c", "cancel:start")        # token hết + vault rút -> xin email
+    check(api.cancelled_with is None, "chưa hủy khi chưa có email")
+    check(orch.store.load("c2c").awaiting_edit_email is True, "đang chờ email để hủy")
+    r = orch.handle_turn("c2c", "a@b.com")
+    check(api.cancelled_with == "a@b.com", "có email -> hủy với email THẬT")
+    check(r.state == S.CANCELLED, "hủy xong -> CANCELLED")
+
+
+def test_edit_after_2min_wrong_email_then_correct():
+    """Sau 2', nhập email SAI -> báo lỗi + VẪN xin lại (không kẹt); nhập ĐÚNG -> sửa được."""
+    api = StubApi()
+    orch = _orch(api)
+    _drive(orch, "cw", *_HAPPY)                        # booking email = a@b.com
+    _expire_edit_window(orch, "cw")
+    orch.handle_turn("cw", "modify:start")
+    orch.handle_turn("cw", "modify:slot")
+    orch.handle_turn("cw", "slot:14:15")
+    orch.handle_turn("cw", "confirm:yes")              # -> xin email
+    orch.handle_turn("cw", "wrong@b.com")              # email SAI
+    check(api.patched_body is None, "email sai -> chưa PATCH")
+    ses = orch.store.load("cw")
+    check(ses.awaiting_edit_email is True, "email sai -> VẪN chờ email (không kẹt)")
+    check(ses.slots.email is None, "email sai -> reset để nhập lại")
+    r = orch.handle_turn("cw", "a@b.com")              # email ĐÚNG
+    check(api.patched_body is not None, "email đúng -> PATCH thành công")
+    check(api.patched_body.get("email") == "a@b.com", "PATCH dùng ĐÚNG email (không kẹt email sai)")
+    check(r.state == S.DONE, "sửa xong -> DONE")
+
+
+def test_summary_hides_unresolved_phone_placeholder():
+    """Vault đã rút -> tóm tắt CONFIRM KHÔNG rò rỉ '{{phone_1}}' (bug user thấy)."""
+    from app import nlg
+    from app.session import Session as Ses, Slots as Sl
+    ses = Ses(conversation_id="c", lang="vi",
+              slots=Sl(date=_FUTURE_DATE, slot="14:00", party_size=1, course_name="C",
+                       phone="{{phone_1}}"))
+    ses.vault = {}                                     # vault rút -> phone không giải được
+    summ = nlg.build_prompt("CONFIRM", ses, {}, "vi")["facts"]["summary"]
+    check("{{phone_1}}" not in summ, "không rò rỉ placeholder khi vault đã rút")
+
+    ses2 = Ses(conversation_id="c", lang="vi",
+               slots=Sl(date=_FUTURE_DATE, slot="14:00", party_size=1, course_name="C",
+                        phone="{{phone_1}}"))
+    ses2.vault = {"{{phone_1}}": "0901234567"}
+    summ2 = nlg.build_prompt("CONFIRM", ses2, {}, "vi")["facts"]["summary"]
+    check("{{phone_1}}" in summ2, "vault còn -> vẫn nêu SĐT (placeholder, unmask sau)")
+
+
+def test_done_shows_quick_edit_countdown():
+    """Đặt xong hiện đồng hồ 'sửa nhanh còn ~m:ss' (BR-17); menu Sửa lịch cũng nhắc lại."""
+    api = StubApi()
+    orch = _orch(api)
+    r = _drive(orch, "cq", *_HAPPY)
+    check(r.state == S.DONE, "đặt xong -> DONE")
+    check("Sửa/hủy nhanh" in r.reply_text and ":" in r.reply_text,
+          "DONE hiện đồng hồ sửa nhanh (m:ss)")
+    menu = orch.handle_turn("cq", "modify:start")
+    check("Sửa/hủy nhanh" in menu.reply_text, "menu MODIFY cũng nhắc cửa sổ sửa nhanh")
+
+
+def test_quick_edit_note_live_and_expired():
+    """Còn giờ -> 'còn khoảng m:ss'; hết 2' -> nhắc cần nhập lại email."""
+    from app import nlg
+    from app.session import Session as Ses
+    ses = Ses(conversation_id="c", lang="vi", booking_code="X",
+              edit_token_expires_at=time.time() + 90)
+    check("còn khoảng" in nlg._quick_edit_note(ses), "còn thời gian -> 'còn khoảng m:ss'")
+    ses.edit_token_expires_at = time.time() - 1
+    check("cần nhập lại email" in nlg._quick_edit_note(ses), "hết 2' -> nhắc cần email")
+    ses.edit_token_expires_at = None
+    check(nlg._quick_edit_note(ses) == "", "chưa có mốc -> không hiện gì")
 
 
 def run_all():

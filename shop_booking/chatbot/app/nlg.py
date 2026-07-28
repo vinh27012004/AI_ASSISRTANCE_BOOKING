@@ -11,8 +11,9 @@ widget của chính khách.
 from __future__ import annotations
 
 import json
+import time
 
-from app import templates
+from app import pii, templates
 from app.llm_client import LLMError, RealLLMClient
 from app.session import Session
 
@@ -45,7 +46,9 @@ def build_prompt(state_key: str, session: Session, api_result: dict, lang: str) 
 # text phải khớp). Đa ngôn ngữ vẫn giữ vì template đã tách vi/en/ja.
 # ADDON: khi đặt NHÓM, câu phải nêu ĐANG hỏi "Người n/m" (BR-10) — để LLM diễn đạt thì nó
 # hay bỏ mất chỉ số này, khiến người 2 nhìn giống hỏi lại người 1. Ép template tất định.
-_LITERAL_SAFE_KEYS = {"SLOT", "ADDON", "END", "HANDOFF", "ERROR", "DONE", "UPDATED", "CANCELLED"}
+# MODIFY: menu "đổi gì" — ép template tất định để chèn đồng hồ "sửa nhanh còn ~m:ss" (BR-17)
+# chính xác, không để LLM bịa/bỏ.
+_LITERAL_SAFE_KEYS = {"SLOT", "ADDON", "MODIFY", "END", "HANDOFF", "ERROR", "DONE", "UPDATED", "CANCELLED"}
 
 
 def generate(prompt: dict, llm: RealLLMClient | None) -> str:
@@ -103,7 +106,34 @@ def _facts_for(state_key: str, session: Session, api_result: dict) -> dict:
     elif state_key in ("END", "HANDOFF", "ERROR"):
         facts["message"] = ar.get("message", "")
         facts["shop_phone"] = ar.get("shop_phone") or session.shop_phone or ""
+
+    # Đồng hồ "sửa nhanh còn ~m:ss" (BR-17) cho màn đặt xong / đã cập nhật / menu sửa.
+    if state_key in ("DONE", "UPDATED", "MODIFY"):
+        facts["sua_nhanh"] = _quick_edit_note(session)
     return facts
+
+
+# (còn thời gian sửa nhanh, hết thời gian) — {t} là "m:ss" còn lại.
+_QUICK_EDIT = {
+    "vi": (" ⏱ Sửa/hủy nhanh (không cần nhập email) còn khoảng {t}.",
+           " ⏱ Cửa sổ sửa nhanh 2 phút đã hết — sửa/hủy sẽ cần nhập lại email."),
+    "en": (" ⏱ Quick edit/cancel (no email needed) for about {t} more.",
+           " ⏱ The 2-minute quick-edit window has passed — editing now needs your email."),
+    "ja": (" ⏱ あと約{t}、メール不要で変更・キャンセルできます。",
+           " ⏱ 2分の即時変更枠は終了しました。変更にはメールの入力が必要です。"),
+}
+
+
+def _quick_edit_note(session: Session) -> str:
+    """Nhắc cửa sổ sửa nhanh 2' (BR-17): còn giờ -> 'còn ~m:ss'; hết -> nhắc cần email.
+    Chatbot không tick liên tục được nên đây là ẢNH CHỤP lúc gửi tin (cập nhật mỗi lượt)."""
+    exp = session.edit_token_expires_at
+    if not exp:
+        return ""
+    lang = session.lang if session.lang in _QUICK_EDIT else "vi"
+    left = int(round(exp - time.time()))
+    live, over = _QUICK_EDIT[lang]
+    return live.format(t=f"{left // 60}:{left % 60:02d}") if left > 0 else over
 
 
 _ADDON_LINES = {
@@ -192,6 +222,8 @@ def _order_summary(session: Session, api_result: dict) -> str:
         parts.append("nhân viên " + ("nữ" if s.therapist_gender == "female" else "nam"))
     elif s.therapist_id:
         parts.append("nhân viên đã chỉ định")
-    if s.phone:
+    # SĐT: chỉ nêu khi placeholder CÒN giải được (vault chưa rút) — nếu đã rút (vd sửa sau 2')
+    # thì unmask ở cuối không thay được nữa, sẽ lộ "{{phone_1}}" ra câu. Bỏ qua cho sạch.
+    if s.phone and not pii.unmask_value(s.phone, session.vault).startswith("{{"):
         parts.append(f"SĐT {s.phone}")   # placeholder -> unmask ở orchestrator
     return ", ".join(parts)

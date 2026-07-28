@@ -58,6 +58,11 @@ class Orchestrator:
         if not (user_text or "").strip():
             return self._greeting(session)
 
+        # Đang chờ khách NHẬP LẠI EMAIL để xác thực sửa/hủy sau cửa sổ 2' (BR-15) — dòng này
+        # là email khách gõ, không phải câu đặt lịch: nạp email rồi làm nốt thao tác đang chờ.
+        if session.awaiting_edit_email and not sm.is_button_token(user_text):
+            return self._resume_with_edit_email(session, user_text)
+
         # Token nút: tất định, bỏ qua NLU + PII (giá trị đã là id/giờ, không phải câu nói).
         if sm.is_button_token(user_text):
             signal = sm.apply_button(session, user_text)
@@ -228,6 +233,19 @@ class Orchestrator:
             session.state = S.CONFIRM
             return {}
 
+        # Chốt chặn: PII phải giải được THẬT. Nếu placeholder mất (vault rút giữa chừng) ->
+        # đừng gửi "{{email_1}}" cho BE (400 VALIDATION_ERROR -> REPROMPT khó hiểu) mà xin lại.
+        phone = pii.unmask_value(s.phone, session.vault)
+        email = pii.unmask_value(s.email, session.vault)
+        if not self._pii_resolved(phone) or not self._pii_resolved(email):
+            if not self._pii_resolved(phone):
+                s.phone = None
+            if not self._pii_resolved(email):
+                s.email = None
+            s.contact_verified = False
+            session.state = S.CONTACT
+            return {}
+
         s.ensure_guest_addons()                                   # BR-10: add-on RIÊNG từng người
         reservations = [{"addon_ids": list(s.guest_addons[i])}
                         for i in range(s.party_size or 1)]
@@ -236,8 +254,8 @@ class Orchestrator:
             "date": s.date,
             "start_time": s.slot,
             "party_size": s.party_size,
-            "phone": pii.unmask_value(s.phone, session.vault),
-            "email": pii.unmask_value(s.email, session.vault),
+            "phone": phone,
+            "email": email,
             "course_id": s.course_id,
             "reservations": reservations,
             "therapist_id": s.therapist_id,
@@ -283,18 +301,20 @@ class Orchestrator:
                 self.api.patch_booking(code, body, edit_token=session.edit_token)  # BR-17
             else:
                 real_email = pii.unmask_value(s.email, session.vault)
-                if not real_email or real_email == s.email:        # vault đã rút -> hết email
-                    session.editing = False
-                    session.state = S.DONE
+                if not self._pii_resolved(real_email):             # vault đã rút -> xin LẠI email
+                    session.awaiting_edit_email = True              # (BR-15) rồi PATCH tiếp
+                    session.edit_email_for = "update"
                     return {"render_key": "ERROR",
-                            "message": f"Cửa sổ sửa nhanh đã hết. Vui lòng vào trang Quản lý "
-                                       f"đặt chỗ với mã {code} và email để sửa ạ."}
+                            "message": f"Cửa sổ sửa nhanh 2 phút đã hết. Anh/chị nhập lại email "
+                                       f"đã đặt (mã {code}) để em xác thực và cập nhật lịch giúp ạ."}
                 body["email"] = real_email                         # BR-15
                 self.api.patch_booking(code, body, edit_token=None)
         except ShopApiError as e:
             return self._map_error(session, e)
 
         session.editing = False
+        session.awaiting_edit_email = False
+        session.edit_email_for = ""
         session.state = S.DONE
         return {"render_key": "UPDATED"}
 
@@ -307,18 +327,45 @@ class Orchestrator:
         if not code:
             return self._reply(session, "ERROR", {"message": "Hiện chưa có lịch nào để hủy ạ."})
         real_email = pii.unmask_value(s.email, session.vault)
-        if not real_email or real_email == s.email:                # vault đã rút -> hết email
+        if not self._pii_resolved(real_email):                     # vault đã rút -> xin LẠI email
+            session.awaiting_edit_email = True                     # (BR-15) rồi hủy tiếp
+            session.edit_email_for = "cancel"
             return self._reply(session, "ERROR", {
-                "message": f"Cửa sổ hủy nhanh đã hết. Vui lòng vào trang Quản lý đặt chỗ với "
-                           f"mã {code} và email để hủy ạ."})
+                "message": f"Cửa sổ hủy nhanh 2 phút đã hết. Anh/chị nhập lại email đã đặt "
+                           f"(mã {code}) để em xác thực và hủy lịch giúp ạ."})
         try:
             self.api.cancel_booking(code, real_email)              # cancel cần email (BR-15)
         except ShopApiError as e:
             res = self._map_error(session, e)
             return self._reply(session, res.get("render_key", session.state), res)
 
+        session.awaiting_edit_email = False
+        session.edit_email_for = ""
         session.state = S.CANCELLED
         return self._reply(session, "CANCELLED", {})
+
+    # ------------------------------------------------------------------ #
+    #  Nhập lại email để xác thực sửa/hủy sau cửa sổ 2' (BR-15)           #
+    # ------------------------------------------------------------------ #
+    def _resume_with_edit_email(self, session: Session, user_text: str) -> BotReply:
+        """Khách gõ email để xác thực -> nạp vào vault rồi làm nốt update/cancel đang chờ.
+        Email SAI -> BE trả BOOKING_NOT_FOUND -> _map_error gỡ email sai + re-arm để xin lại."""
+        pii.mask(user_text, session.vault)                          # side effect: nạp email vào vault
+        email_ph = next((k for k in session.vault if k.startswith("{{email_")), None)
+        if not email_ph:                                            # gõ chưa ra email hợp lệ -> vẫn chờ, hỏi lại
+            return self._reply(session, "ERROR", {
+                "message": "Em chưa nhận được email hợp lệ. Anh/chị nhập lại email đã đặt lịch giúp em ạ."})
+
+        session.slots.email = email_ph
+        session.awaiting_edit_email = False        # tiêu thụ lượt này; email sai sẽ được re-arm
+        # KHÔNG xóa edit_email_for ở đây — nếu email sai còn biết đang chờ update hay cancel.
+
+        if session.edit_email_for == "cancel":
+            return self._cancel(session)
+        session.slots.confirm = "yes"                              # thay đổi đã xác nhận từ trước
+        session.state = S.UPDATE
+        res = self._update_booking(session)
+        return self._reply(session, res.get("render_key", session.state), res)
 
     # ------------------------------------------------------------------ #
     #  Map error.code -> nhánh state (§3.6)                               #
@@ -335,8 +382,18 @@ class Orchestrator:
             return {"suggested_slots": d.get("suggested_slots", [])}
 
         if code == "PHONE_BLOCKED":                                # A5
-            session.state = S.END
-            return {"render_key": "END", "message": e.message, "shop_phone": d.get("shop_phone")}
+            # Chặn theo TỪNG SĐT -> cho khách thử SỐ KHÁC thay vì kết thúc hẳn (trước đây vào
+            # END: state terminal khiến maybe_drop_vault XÓA vault -> email placeholder mất ->
+            # booking gửi "{{email_1}}" -> 400 VALIDATION_ERROR -> REPROMPT khó hiểu).
+            if s.phone:
+                session.vault.pop(s.phone, None)                   # gỡ đúng số bị chặn khỏi vault
+            s.phone = None
+            s.contact_verified = False
+            session.state = S.CONTACT                              # KHÔNG terminal -> vault (email) còn nguyên
+            support = self._contact_phone(session, d.get("shop_phone"))
+            return {"render_key": "ERROR",
+                    "message": e.message + f" Anh/chị thử số điện thoại khác giúp em, "
+                                           f"hoặc liên hệ hỗ trợ: {support}."}
 
         if code == "THERAPIST_OFF_SHIFT":                          # A4
             session.state = S.THERAPIST
@@ -371,10 +428,23 @@ class Orchestrator:
             session.state = S.PARTY_SIZE
             s.party_size = None
             s.party_over = False
-            return {"render_key": "HANDOFF", "message": e.message, "shop_phone": d.get("shop_phone")}
+            return {"render_key": "HANDOFF", "message": e.message,
+                    "shop_phone": self._contact_phone(session, d.get("shop_phone"))}
+
+        if code == "BOOKING_NOT_FOUND":
+            # Email không khớp khi xác thực sửa/hủy sau 2' -> gỡ email sai khỏi vault, XIN LẠI
+            # (giữ nguyên các thay đổi đã chọn). Không kẹt ở email sai lần trước.
+            if s.email:
+                session.vault.pop(s.email, None)
+            s.email = None
+            session.awaiting_edit_email = True
+            return {"render_key": "ERROR", "message": e.message}
 
         if code in ("MODIFY_DEADLINE_PASSED", "EDIT_TOKEN_EXPIRED", "SHOP_CHANGE_NOT_ALLOWED"):
-            return {"render_key": "ERROR", "message": e.message, "shop_phone": d.get("shop_phone")}
+            session.awaiting_edit_email = False        # lỗi KHÔNG do email -> đừng lặp xin email
+            session.edit_email_for = ""
+            return {"render_key": "ERROR", "message": e.message,
+                    "shop_phone": self._contact_phone(session, d.get("shop_phone"))}
 
         if code == "VALIDATION_ERROR":
             return {"render_key": "REPROMPT"}
@@ -387,7 +457,7 @@ class Orchestrator:
     #  Handoff (MVP: chỉ nút gọi cửa hàng — Q9)                           #
     # ------------------------------------------------------------------ #
     def _handoff(self, session: Session, reason_party: bool = False) -> BotReply:
-        phone = self._shop_phone(session)
+        phone = self._contact_phone(session)
         message = ("Mỗi lượt đặt tối đa 3 người. " if reason_party else "")
         return self._reply(session, "HANDOFF",
                            {"message": message, "shop_phone": phone})
@@ -432,7 +502,7 @@ class Orchestrator:
         buttons_state = render_key if render_key in (S.END, "HANDOFF", S.MODIFY) else session.state
         buttons = buttons_for(buttons_state, session, api_result)
 
-        session.maybe_drop_vault()                                 # Q5: rút vault sau 2'
+        session.maybe_drop_vault()                                 # Q5: rút vault sau 2'F
         self.store.save(session)
 
         return BotReply(
@@ -446,6 +516,11 @@ class Orchestrator:
     # ------------------------------------------------------------------ #
     #  Helpers                                                            #
     # ------------------------------------------------------------------ #
+    @staticmethod
+    def _pii_resolved(value: str | None) -> bool:
+        """PII đã giải ra giá trị THẬT chưa (không None, không còn là placeholder '{{...}}')."""
+        return bool(value) and not value.startswith("{{")
+
     def _capture_contact_from_vault(self, session: Session) -> None:
         """SĐT/email khách gõ giữa câu -> masker đã nạp vào vault; gắn placeholder vào slots."""
         s = session.slots
@@ -588,6 +663,13 @@ class Orchestrator:
         open_days = data.get("open_dates") or []
         self._avail_cache[shop_id] = (now, open_days)
         return open_days
+
+    def _contact_phone(self, session: Session, be_phone: str | None = None) -> str:
+        """Số để khách LIÊN HỆ khi không đặt online được (chặn NG A5 / handoff / nhóm đông A8).
+        Ưu tiên số hỗ trợ/CSKH ở env (SUPPORT_PHONE, hoặc FALLBACK_SHOP_PHONE) để mọi ca 'liên
+        hệ' về một đầu mối; chưa cấu hình mới dùng số cửa hàng (BE trả, rồi /shops)."""
+        return (self.settings.support_phone or self.settings.fallback_shop_phone
+                or be_phone or self._shop_phone(session))
 
     def _shop_phone(self, session: Session) -> str:
         if session.shop_phone:

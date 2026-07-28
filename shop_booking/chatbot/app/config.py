@@ -34,6 +34,10 @@ class Settings:
     session_ttl_seconds: int
     vault_enc_key: str
     fallback_shop_phone: str
+    # Số hỗ trợ/CSKH hiển thị khi khách KHÔNG đặt online được (chặn NG A5 / handoff / nhóm
+    # đông A8): mọi ca "liên hệ" gom về một đầu mối thay vì số riêng từng cửa hàng. Rỗng ->
+    # dùng số cửa hàng như cũ. Có default nên constructor cũ (test) không cần truyền.
+    support_phone: str = ""
 
     @property
     def use_real_llm(self) -> bool:
@@ -56,4 +60,6 @@ def load_settings() -> Settings:
         session_ttl_seconds=int(os.environ.get("SESSION_TTL_SECONDS", "1800")),
         vault_enc_key=os.environ.get("VAULT_ENC_KEY", ""),
         fallback_shop_phone=os.environ.get("FALLBACK_SHOP_PHONE", ""),
+        # SUPPORT_PHONE riêng; chưa đặt thì lấy FALLBACK_SHOP_PHONE (số env sẵn có).
+        support_phone=os.environ.get("SUPPORT_PHONE", os.environ.get("FALLBACK_SHOP_PHONE", "")),
     )

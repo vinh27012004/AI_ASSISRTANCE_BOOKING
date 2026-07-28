@@ -40,6 +40,7 @@ def extract(masked_text: str, lang: str, llm: RealLLMClient | None) -> dict | No
     if llm is None:
         parsed = _rule_based(masked_text)
     else:
+        parsed = None
         try:
             today = date.today()
             raw = llm.complete(
@@ -49,7 +50,11 @@ def extract(masked_text: str, lang: str, llm: RealLLMClient | None) -> dict | No
             )
             parsed = validate_schema(_parse_json(raw))
         except LLMError:
-            # Router lỗi -> đừng để rơi cả lượt: thử rule-based rồi mới bó tay.
+            parsed = None
+        # Router LỖI *hoặc* trả JSON sai/không parse được (router hay "nói" thay vì trích) ->
+        # thử rule-based rồi mới bó tay. Trước đây chỉ fallback khi LLMError, nên câu rõ như
+        # "đồng ý đặt" mà router trả text thường -> None -> REPROMPT oan (bot "suy nghĩ sai").
+        if parsed is None:
             parsed = _rule_based(masked_text)
 
     if parsed is None:

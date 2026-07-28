@@ -87,16 +87,16 @@ FAKE = {
     },
     "DONE": {
         "vi": "Đặt thành công ạ! Mã đặt chỗ {booking_code} đã gửi vào email của anh/chị. "
-              "Anh/chị có thể sửa hoặc hủy lịch ngay dưới đây.",
+              "Anh/chị có thể sửa hoặc hủy lịch ngay dưới đây.{sua_nhanh}",
         "en": "Booked! Your code {booking_code} was emailed to you. "
-              "You can edit or cancel below.",
+              "You can edit or cancel below.{sua_nhanh}",
         "ja": "ご予約完了です！予約コード {booking_code} をメールでお送りしました。"
-              "下のボタンから変更・キャンセルできます。",
+              "下のボタンから変更・キャンセルできます。{sua_nhanh}",
     },
     "UPDATED": {
-        "vi": "Đã cập nhật lịch {booking_code} theo thông tin mới ạ. Email xác nhận đã được gửi lại.",
-        "en": "Your booking {booking_code} has been updated. A confirmation email was sent.",
-        "ja": "ご予約 {booking_code} を更新しました。確認メールを再送しました。",
+        "vi": "Đã cập nhật lịch {booking_code} theo thông tin mới ạ. Email xác nhận đã được gửi lại.{sua_nhanh}",
+        "en": "Your booking {booking_code} has been updated. A confirmation email was sent.{sua_nhanh}",
+        "ja": "ご予約 {booking_code} を更新しました。確認メールを再送しました。{sua_nhanh}",
     },
     "CANCELLED": {
         "vi": "Đã hủy lịch {booking_code} ạ. Rất mong được phục vụ anh/chị lần sau!",
@@ -104,17 +104,17 @@ FAKE = {
         "ja": "ご予約 {booking_code} をキャンセルしました。またのご利用をお待ちしております。",
     },
     "MODIFY": {
-        "vi": "Anh/chị muốn đổi phần nào của lịch ạ?",
-        "en": "What would you like to change?",
-        "ja": "どの項目を変更しますか？",
+        "vi": "Anh/chị muốn đổi phần nào của lịch ạ?{sua_nhanh}",
+        "en": "What would you like to change?{sua_nhanh}",
+        "ja": "どの項目を変更しますか？{sua_nhanh}",
     },
     "END": {
-        "vi": "{message} Anh/chị vui lòng liên hệ cửa hàng: {shop_phone}.",
+        "vi": "{message} Anh/chị vui lòng liên hệ hỗ trợ: {shop_phone}.",
         "en": "{message} Please contact the shop: {shop_phone}.",
         "ja": "{message} お手数ですが店舗までご連絡ください：{shop_phone}。",
     },
     "HANDOFF": {
-        "vi": "{message}Anh/chị vui lòng gọi trực tiếp cửa hàng để được hỗ trợ nhé: {shop_phone}.",
+        "vi": "{message}Anh/chị vui lòng gọi để được hỗ trợ nhé: {shop_phone}.",
         "en": "{message}Please call the shop directly for assistance: {shop_phone}.",
         "ja": "{message}お手数ですが店舗まで直接お電話ください：{shop_phone}。",
     },
