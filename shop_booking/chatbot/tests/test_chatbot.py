@@ -53,6 +53,8 @@ class StubApi:
 
     def get_services(self, shop_id, date, party_size=None):
         self.calls.append("services")
+        if date in self.closed_dates:              # A1: ngày shop nghỉ -> 200 rỗng
+            return {"courses": [], "addons": [], "reason": "SHOP_CLOSED"}
         return {"courses": [{"id": 3, "name": "Toàn thân", "duration_min": 60, "price": 5000}],
                 "addons": [{"id": 7, "name": "Foot", "duration_min": 15, "price": 1000,
                             "restricted_course_ids": []}],
@@ -179,15 +181,20 @@ def test_t3_party_over():
 
 
 def test_invalidate_on_course_change():
-    """Đổi course (nút) -> xóa add-on + slot + confirm (add-on phụ thuộc course, BR-09)."""
+    """Đổi course bằng lời -> xóa add-on + slot + confirm (add-on phụ thuộc course, BR-09)."""
     ses = Session(conversation_id="c", turn_count=1,
                   slots=Slots(shop_id=1, date="d", party_size=1, course_id=3,
                               guest_addons=[[7]], addons_decided=True, slot="14:00", confirm="yes"))
-    sm.apply_button(ses, "course:9")
-    check(ses.slots.course_id == 9, "course đổi sang 9")
+    sm.merge_params(ses, {"course": "Aroma"})
+    check(ses.slots.course_id is None and ses.slots.course_text == "Aroma",
+          "đổi course -> bỏ id cũ, giữ tên để map lại qua GET /services")
     check(ses.slots.guest_addons == [] and ses.slots.addons_decided is False, "đổi course phải reset add-on")
     check(ses.slots.slot is None, "đổi course phải xóa slot (BR-07)")
     check(ses.slots.confirm is None, "đổi đơn phải xóa confirm")
+
+
+_STUB_ADDONS = [{"id": 7, "name": "Foot", "duration_min": 15, "price": 1000,
+                 "restricted_course_ids": []}]
 
 
 def test_group_addons_per_person():
@@ -196,13 +203,13 @@ def test_group_addons_per_person():
                   slots=Slots(shop_id=1, date="d", party_size=3, course_id=3))
     ses.slots.ensure_guest_addons()
     check(sm.next_state(ses) == S.ADDON, "vào bước ADDON")
-    sm.apply_button(ses, "addon:7")           # người 1: add-on 7
-    check(ses.slots.addon_guest_idx == 0, "vẫn đang hỏi người 1")
-    sm.apply_button(ses, "addon:done")        # xong người 1 -> người 2
-    check(ses.slots.addon_guest_idx == 1 and not ses.slots.addons_decided, "chuyển sang người 2")
-    sm.apply_button(ses, "addon:none")        # người 2: không thêm -> người 3
+    ses.slots.addon_texts = ["Foot"]                       # người 1 đọc tên add-on
+    check(Orchestrator._match_addons(ses, _STUB_ADDONS) is True, "khớp tên -> chọn cho người 1")
+    check(ses.slots.addon_guest_idx == 1 and not ses.slots.addons_decided,
+          "chọn xong người 1 -> tự sang người 2")
+    sm.skip_addon_guest(ses)                               # người 2: "không"
     check(ses.slots.addon_guest_idx == 2, "chuyển sang người 3")
-    sm.apply_button(ses, "addon:done")        # xong người 3 (cuối) -> chốt hết
+    sm.skip_addon_guest(ses)                               # người 3 (cuối) -> chốt hết
     check(ses.slots.addons_decided is True, "hỏi hết mọi người -> chốt")
     check(ses.slots.guest_addons == [[7], [], []], "add-on lưu RIÊNG từng người")
 
@@ -210,12 +217,11 @@ def test_group_addons_per_person():
 def test_addon_is_separate_step():
     """Chọn course KHÔNG tự nhảy qua SLOT — phải qua bước ADDON (chốt add-on) trước."""
     ses = Session(conversation_id="c", turn_count=1,
-                  slots=Slots(shop_id=1, date="d", party_size=1))
-    sm.apply_button(ses, "course:3")
+                  slots=Slots(shop_id=1, date="d", party_size=1, course_id=3))
     check(sm.next_state(ses) == S.ADDON, "sau course phải vào ADDON, chưa qua SLOT")
-    sm.apply_button(ses, "addon:none")  # không thêm add-on
+    sm.skip_addon_guest(ses)                               # không thêm add-on
     check(sm.next_state(ses) == S.THERAPIST, "chốt add-on -> THERAPIST (party 1) trước SLOT")
-    sm.apply_button(ses, "therapist:skip")
+    sm.merge_params(ses, {"therapist": "none"})
     check(sm.next_state(ses) == S.SLOT, "chọn người xong mới tới SLOT")
 
 
@@ -223,9 +229,9 @@ def test_therapist_before_slot_filters():
     """Chỉ định nhân viên TRƯỚC -> SLOT gọi GET /slots lọc theo đúng người đó."""
     api = StubApi()
     orch = _orch(api)
-    r = _drive(orch, "c7", "", "shop:1", f"date:{_FUTURE_DATE}", "party:1", "course:3", "addon:none")
+    r = _drive(orch, "c7", "", "Shop A", _FUTURE_DATE, "1 người", "Toàn thân", "không")
     check(r.state == S.THERAPIST, f"phải hỏi nhân viên trước khi chọn giờ, đang {r.state}")
-    r = orch.handle_turn("c7", "therapist:5")           # chỉ định nhân viên id=5
+    r = orch.handle_turn("c7", "Hana")           # chỉ định nhân viên id=5
     check(r.state == S.SLOT, "chọn người xong mới tới SLOT")
     check(api.last_slots_kw.get("therapist_id") == 5, "SLOT phải lọc giờ theo nhân viên đã chọn")
 
@@ -272,23 +278,49 @@ def test_order_slots_keeps_last_and_full_range():
 
 
 def test_language_selection_and_lock():
-    """Mở chat -> nút chọn ngôn ngữ; chọn xong -> hỏi tiếp bằng ngôn ngữ đó, KHÔNG tự đoán lại."""
+    """Nói tên ngôn ngữ (không còn nút) -> khoá ngôn ngữ đó, KHÔNG tự đoán lại."""
     api = StubApi()
     orch = _orch(api)
-    r = orch.handle_turn("cl", "")                          # mở chat
-    vals = [b["value"] for b in r.ui["buttons"]]
-    check(set(vals) == {"lang:vi", "lang:en", "lang:ja"}, "màn chào phải có 3 nút ngôn ngữ")
+    r = orch.handle_turn("cl", "")                          # mở chat -> câu chào song ngữ
+    check(r.ui["buttons"] == [], "không còn nút lựa chọn nào")
+    check("AI" in r.reply_text, "câu chào nói rõ là trợ lý AI (minh bạch APPI)")
+    check("Shop A" in r.reply_text, "câu chào ĐỌC luôn danh sách cửa hàng để chọn được ngay")
 
-    r = orch.handle_turn("cl", "lang:en")                   # chọn English
+    r = orch.handle_turn("cl", "English")                   # chọn English bằng lời
     check(r.state == S.SHOP, "chọn ngôn ngữ xong -> hỏi cửa hàng")
     check("shop" in r.reply_text.lower(), "câu hỏi cửa hàng bằng tiếng Anh (fake template en)")
 
     # Đã khoá 'en': gõ câu tiếng Việt cũng KHÔNG lật ngôn ngữ.
-    orch.handle_turn("cl", "shop:1")
+    orch.handle_turn("cl", "Shop A")
     orch.handle_turn("cl", "cho tôi đặt lịch ngày mai với")  # có dấu tiếng Việt
-    from app.session import InMemorySessionStore  # noqa: F401 — chỉ để rõ store
     ses = orch.store.load("cl")
     check(ses.lang == "en" and ses.lang_locked is True, "đã chọn en -> giữ en dù gõ tiếng Việt")
+
+
+def test_lang_not_flipped_by_data_names():
+    """Tên cửa hàng/add-on ('Shop A', 'Foot') toàn chữ Latin nhưng là DỮ LIỆU, không phải
+    tín hiệu tiếng Anh — không được làm bot lật sang en giữa chừng."""
+    api = StubApi()
+    orch = _orch(api)
+    orch.handle_turn("clf", "")
+    r = orch.handle_turn("clf", "Shop A")               # tên cửa hàng, không phải câu tiếng Anh
+    check(orch.store.load("clf").lang == "vi", "chọn shop bằng tên KHÔNG lật ngôn ngữ sang en")
+    check("Anh/chị" in r.reply_text, "vẫn hỏi tiếp bằng tiếng Việt")
+
+    # Câu tiếng Anh THẬT thì vẫn đổi được (ở bước không phải chọn-từ-danh-sách).
+    orch.handle_turn("clf", _FUTURE_DATE)
+    r = orch.handle_turn("clf", "I want to book for two people")
+    check(orch.store.load("clf").lang == "en", "câu tiếng Anh thật -> vẫn đổi sang en")
+
+
+def test_shop_by_name_free_text():
+    """Nói tên cửa hàng (không bấm nút) -> map đúng shop_id rồi đi tiếp, không hỏi lại."""
+    api = StubApi()
+    orch = _orch(api)
+    orch.handle_turn("csn", "")
+    r = orch.handle_turn("csn", "Shop A")
+    check(orch.store.load("csn").slots.shop_id == 1, "nói tên -> map đúng shop_id")
+    check(r.state == S.DATE, f"chọn được shop -> hỏi ngày, đang {r.state}")
 
 
 class _HallucinatingLLM:
@@ -331,7 +363,6 @@ def test_parse_date_freeform():
           "không bật bare_day -> số trần KHÔNG bị hiểu là ngày (tránh nhầm số người)")
     check(nlu.parse_date_freeform("31/8", today=t) == "2026-08-31", "'31/8' -> 31 tháng 8")
     check(nlu.parse_date_freeform("ngày 15 tháng 8", today=t) == "2026-08-15", "'ngày 15 tháng 8'")
-    check(nlu.parse_date_freeform("8月20日", today=t) == "2026-08-20", "kiểu Nhật 8月20日")
     check(nlu.parse_date_freeform("2026-08-03", today=t) == "2026-08-03", "ISO giữ nguyên")
     check(nlu.parse_date_freeform("mai", today=t) == "2026-07-28", "tương đối 'mai'")
     check(nlu.parse_date_freeform("31/2", today=t) is None, "'31/2' vô lý -> None")
@@ -343,7 +374,7 @@ def test_date_freeform_reply_at_date_step():
     api = StubApi()
     orch = _orch(api)
     orch.handle_turn("cdf", "")
-    r = orch.handle_turn("cdf", "shop:1")
+    r = orch.handle_turn("cdf", "Shop A")
     check(r.state == S.DATE, f"sau shop -> hỏi ngày, đang {r.state}")
     r = orch.handle_turn("cdf", "15")
     ses = orch.store.load("cdf")
@@ -351,19 +382,38 @@ def test_date_freeform_reply_at_date_step():
     check(r.state == S.PARTY_SIZE, f"hiểu ngày xong -> hỏi số người, đang {r.state}")
 
 
-def test_date_buttons_show_active_only():
-    """Nút ngày chỉ hiện ngày shop THỰC SỰ có ca — ngày nghỉ bị loại (bug user báo)."""
+def test_date_question_reads_active_days_only():
+    """Câu hỏi ngày chỉ ĐỌC ra ngày shop THỰC SỰ có ca — ngày nghỉ không được mời."""
     from datetime import date, timedelta
     api = StubApi()
     today = date.today()
-    d0, d1 = today.isoformat(), (today + timedelta(days=1)).isoformat()
-    api.closed_dates = {d0, d1}                    # hôm nay & mai shop nghỉ
+    d0, d1 = today, today + timedelta(days=1)
+    api.closed_dates = {d0.isoformat(), d1.isoformat()}      # hôm nay & mai shop nghỉ
     orch = _orch(api)
     orch.handle_turn("cab", "")
-    r = orch.handle_turn("cab", "shop:1")
-    vals = [b["value"] for b in r.ui["buttons"]]
-    check(f"date:{d0}" not in vals and f"date:{d1}" not in vals, "ngày shop nghỉ KHÔNG hiện làm nút")
-    check(any(v.startswith("date:") for v in vals), "vẫn hiện các ngày còn mở")
+    r = orch.handle_turn("cab", "Shop A")
+    check(r.state == S.DATE, f"sau shop -> hỏi ngày, đang {r.state}")
+    check(f"{d0.day}/{d0.month}" not in r.reply_text and f"{d1.day}/{d1.month}" not in r.reply_text,
+          "ngày shop nghỉ KHÔNG được đọc ra")
+    d2 = today + timedelta(days=2)
+    check(f"{d2.day}/{d2.month}" in r.reply_text, "vẫn đọc các ngày còn mở (dạng 31/7)")
+
+
+def test_shop_closed_date_reads_week_days():
+    """Chọn ngày shop nghỉ (A1) -> báo 'không phục vụ' + ĐỌC các ngày có làm trong 7 ngày
+    tới (không còn nút nên không được nói 'bên dưới')."""
+    from datetime import date, timedelta
+    api = StubApi()
+    today = date.today()
+    closed = today + timedelta(days=2)
+    api.closed_dates = {closed.isoformat()}
+    orch = _orch(api)
+    r = _drive(orch, "ca1", "", "Shop A", closed.isoformat(), "1 người")
+    check(r.state == S.DATE, f"ngày nghỉ -> hỏi lại ngày, đang {r.state}")
+    check("không phục vụ ngày này" in r.reply_text, "báo rõ shop không phục vụ ngày đã chọn")
+    check("bên dưới" not in r.reply_text, "không còn nút thì không được nói 'bên dưới'")
+    check(f"{today.day}/{today.month}" in r.reply_text,
+          "đọc các ngày có làm trong 7 ngày tới (dạng 31/7)")
 
 
 def test_shop_closed_all_days_routes_back_to_shop():
@@ -375,9 +425,9 @@ def test_shop_closed_all_days_routes_back_to_shop():
                         for i in range(Orchestrator._AVAIL_HORIZON_DAYS)}
     orch = _orch(api)
     orch.handle_turn("csc", "")
-    r = orch.handle_turn("csc", "shop:1")
+    r = orch.handle_turn("csc", "Shop A")
     check(r.state == S.SHOP, f"shop nghỉ hết -> quay lại chọn shop, đang {r.state}")
-    check(any(b["value"].startswith("shop:") for b in r.ui["buttons"]), "hiện lại nút chọn cửa hàng")
+    check(orch.store.load("csc").slots.shop_id is None, "bỏ shop đã chọn để khách chọn lại")
 
 
 def test_detect_lang_ignores_pii():
@@ -423,9 +473,9 @@ def test_t13_pii_code():
 # --------------------------------------------------------------------------- #
 #  Luồng đầy đủ qua Orchestrator (LLM=None, StubApi)                           #
 # --------------------------------------------------------------------------- #
-_HAPPY = ("", "shop:1", f"date:{_FUTURE_DATE}", "party:1",
-          "course:3", "addon:none", "therapist:skip", "slot:14:00",
-          "0901234567 a@b.com", "confirm:yes")
+_HAPPY = ("", "Shop A", _FUTURE_DATE, "1 người",
+          "Toàn thân", "không", "ai cũng được", "14:00",
+          "0901234567 a@b.com", "đồng ý đặt")
 
 
 def test_happy_path():
@@ -446,11 +496,11 @@ def test_group_flow_addons_per_person():
     api = StubApi()
     orch = _orch(api)
     r = _drive(orch, "cg",
-               "", "shop:1", f"date:{_FUTURE_DATE}", "party:3", "course:3",
-               "addon:7", "addon:done",     # người 1: add-on 7
-               "addon:none",                # người 2: không thêm
-               "addon:7", "addon:done",     # người 3: add-on 7
-               "slot:14:00", "0901234567 a@b.com", "confirm:yes")
+               "", "Shop A", _FUTURE_DATE, "3 người", "Toàn thân",
+               "Foot", "addon:done",     # người 1: add-on 7
+               "không",                # người 2: không thêm
+               "Foot", "addon:done",     # người 3: add-on 7
+               "14:00", "0901234567 a@b.com", "đồng ý đặt")
     check(r.state == S.DONE, f"nhóm đặt xong -> DONE, đang {r.state}")
     res = [x["addon_ids"] for x in api.created_body["reservations"]]
     check(res == [[7], [], [7]], "reservations add-on RIÊNG từng người (BR-10)")
@@ -463,8 +513,8 @@ def test_a5_phone_blocked():
                                     {"reason": "abc", "shop_phone": "090-1111"})
     orch = _orch(api)
     reply = _drive(orch, "c2",
-                   "", "shop:1", f"date:{_FUTURE_DATE}", "party:1",
-                   "course:3", "addon:none", "therapist:skip", "slot:14:00", "0901234567 a@b.com")
+                   "", "Shop A", _FUTURE_DATE, "1 người",
+                   "Toàn thân", "không", "ai cũng được", "14:00", "0901234567 a@b.com")
     # A5 chặn theo TỪNG số -> cho thử số khác (quay lại CONTACT), KHÔNG kết thúc/đặt.
     check(reply.state == S.CONTACT, f"A5: cho thử số khác (CONTACT), đang {reply.state}")
     check(api.created_body is None, "A5: KHÔNG được tạo booking")
@@ -478,16 +528,16 @@ def test_a6_slot_conflict():
     orch = _orch(api)
     reply = _drive(orch, "c3", *_HAPPY)
     check(reply.state == S.SLOT, f"A6: quay lại SLOT, đang {reply.state}")
-    values = [b["value"] for b in reply.ui["buttons"]]
-    check("slot:14:30" in values and "slot:15:15" in values, "A6: hiện suggested_slots làm nút")
+    check("14:30" in reply.reply_text and "15:15" in reply.reply_text,
+          "A6: ĐỌC suggested_slots ra cho khách chọn lại")
 
 
-def test_handoff_button():
+def test_handoff_reads_phone():
+    """Xin gặp người thật -> đọc số điện thoại ra (không còn nút gọi)."""
     api = StubApi()
     orch = _orch(api)
-    reply = _drive(orch, "c4", "", "shop:1", "cho tôi gặp nhân viên")
-    values = [b["value"] for b in reply.ui["buttons"]]
-    check("handoff:call" in values, "handoff: phải có nút gọi cửa hàng")
+    reply = _drive(orch, "c4", "", "Shop A", "cho tôi gặp nhân viên")
+    check("090-1111" in reply.reply_text, "handoff: phải đọc số cửa hàng cho khách gọi")
 
 
 def test_modify_slot_in_session():
@@ -495,12 +545,12 @@ def test_modify_slot_in_session():
     api = StubApi()
     orch = _orch(api)
     _drive(orch, "c5", *_HAPPY)                       # đặt xong -> DONE
-    menu = orch.handle_turn("c5", "modify:start")
-    check(menu.state == S.DONE and any(b["value"] == "modify:slot" for b in menu.ui["buttons"]),
-          "modify: nút Sửa lịch hiện menu đổi gì")
-    orch.handle_turn("c5", "modify:slot")             # -> quay lại SLOT
-    orch.handle_turn("c5", "slot:14:15")              # chọn giờ mới -> CONFIRM
-    reply = orch.handle_turn("c5", "confirm:yes")     # đồng ý -> PATCH
+    menu = orch.handle_turn("c5", "sửa lịch")
+    check(menu.state == S.DONE and orch.store.load("c5").editing is True,
+          "modify: nói 'sửa lịch' -> vào chế độ sửa, hỏi đổi phần nào")
+    orch.handle_turn("c5", "đổi giờ")             # -> quay lại SLOT
+    orch.handle_turn("c5", "14:15")              # chọn giờ mới -> CONFIRM
+    reply = orch.handle_turn("c5", "đồng ý đặt")     # đồng ý -> PATCH
     check(api.patched_body is not None, "modify: phải gọi PATCH")
     check(api.patched_body["start_time"] == "14:15", "modify: PATCH đúng giờ mới")
     check(reply.state == S.DONE, "modify: xong quay lại DONE")
@@ -511,7 +561,7 @@ def test_cancel_in_session():
     api = StubApi()
     orch = _orch(api)
     _drive(orch, "c6", *_HAPPY)
-    reply = orch.handle_turn("c6", "cancel:start")
+    reply = orch.handle_turn("c6", "hủy lịch")
     check(api.cancelled_with == "a@b.com", "cancel: gửi email THẬT (đã unmask)")
     check(reply.state == S.CANCELLED and reply.done is True, "cancel: state CANCELLED, done")
 
@@ -525,18 +575,18 @@ def test_modify_party_and_course_reset_addons():
                                    guest_addons=[[7], [8]], addons_decided=True, addon_guest_idx=1))
 
     ses = _booked_group()
-    sm.apply_button(ses, "modify:party")
+    sm.apply_modify_target(ses, "party")
     s = ses.slots
-    check(s.party_size is None, "modify:party xóa số người")
+    check(s.party_size is None, "đổi số người -> xóa số người")
     check(s.guest_addons == [] and s.addons_decided is False and s.addon_guest_idx == 0,
-          "modify:party reset add-on về người 1")
+          "đổi số người -> reset add-on về người 1")
 
     ses2 = _booked_group()
-    sm.apply_button(ses2, "modify:course")
+    sm.apply_modify_target(ses2, "course")
     s2 = ses2.slots
-    check(s2.course_id is None, "modify:course xóa course")
+    check(s2.course_id is None, "đổi dịch vụ -> xóa course")
     check(s2.guest_addons == [] and s2.addons_decided is False and s2.addon_guest_idx == 0,
-          "modify:course reset add-on đúng field (không còn set nhầm s.addons)")
+          "đổi dịch vụ -> reset add-on đúng field (không còn set nhầm s.addons)")
 
 
 def test_addon_group_prompt_shows_person_index():
@@ -551,28 +601,34 @@ def test_addon_group_prompt_shows_person_index():
     check("Người 2/2" in out, "ADDON nhóm phải nêu rõ đang hỏi Người 2/2")
 
 
-def test_addon_prompt_confirms_and_single_next_button():
-    """Sau khi chọn add-on: câu XÁC NHẬN 'Đã chọn …' + ĐÚNG MỘT nút đi tiếp (khỏi kẹt toggle)."""
+def test_addon_prompt_reads_list_and_hides_restricted():
+    """Câu hỏi add-on phải ĐỌC tên add-on ra (không còn nút), và ẨN add-on bị cấm với
+    course đang chọn (BR-09) để không mời nhầm."""
     from app import nlg
-    from app.buttons import buttons_for
     from app.session import Session as Ses, Slots as Sl
-    ar = {"addons": [{"id": 7, "name": "Aroma Oil", "duration_min": 30, "price": 1500,
-                      "restricted_course_ids": []}]}
-
-    # Đã chọn add-on cho người 1/3
+    ar = {"addons": [
+        {"id": 7, "name": "Aroma Oil", "duration_min": 30, "price": 1500,
+         "restricted_course_ids": []},
+        {"id": 8, "name": "Hot Stone", "duration_min": 15, "price": 1000,
+         "restricted_course_ids": [3]},          # cấm với course 3
+    ]}
     ses = Ses(conversation_id="c", lang="vi",
-              slots=Sl(party_size=3, course_id=3, guest_addons=[[7], [], []], addon_guest_idx=0))
+              slots=Sl(party_size=1, course_id=3, guest_addons=[[]], addon_guest_idx=0))
     out = nlg.generate(nlg.build_prompt("ADDON", ses, ar, "vi"), None)
-    check("Đã chọn" in out and "Aroma Oil" in out, "đã chọn -> câu xác nhận có tên add-on")
-    nexts = [b for b in buttons_for(S.ADDON, ses, ar) if b["value"] in ("addon:done", "addon:none")]
-    check(len(nexts) == 1 and nexts[0]["value"] == "addon:done", "đã chọn -> đúng 1 nút = addon:done")
-    check("người 1" in nexts[0]["label"], "nhãn nút nêu rõ người 1")
+    check("Aroma Oil" in out, "đọc tên add-on hợp lệ ra cho khách chọn")
+    check("Hot Stone" not in out, "add-on bị cấm với course đang chọn KHÔNG được mời (BR-09)")
+    check("không" in out.lower(), "có hướng dẫn nói 'không' để bỏ qua")
 
-    # Chưa chọn gì -> nút bỏ qua duy nhất
-    ses2 = Ses(conversation_id="c", lang="vi",
-               slots=Sl(party_size=3, course_id=3, guest_addons=[[], [], []], addon_guest_idx=0))
-    nexts2 = [b for b in buttons_for(S.ADDON, ses2, ar) if b["value"] in ("addon:done", "addon:none")]
-    check(len(nexts2) == 1 and nexts2[0]["value"] == "addon:none", "chưa chọn -> đúng 1 nút = addon:none")
+
+def test_match_addons_rejects_restricted():
+    """Khách đọc tên add-on bị cấm với course -> KHÔNG nhận (BR-09), hỏi lại."""
+    ses = Session(conversation_id="c", turn_count=1,
+                  slots=Slots(party_size=1, course_id=3, guest_addons=[[]]))
+    ses.slots.addon_texts = ["Hot Stone"]
+    ok = Orchestrator._match_addons(ses, [{"id": 8, "name": "Hot Stone", "duration_min": 15,
+                                           "restricted_course_ids": [3]}])
+    check(ok is False, "add-on cấm -> không khớp")
+    check(ses.slots.guest_addons == [[]], "không gán add-on cấm cho khách")
 
 
 def test_modify_party_in_session():
@@ -580,16 +636,16 @@ def test_modify_party_in_session():
     api = StubApi()
     orch = _orch(api)
     _drive(orch, "cmp", *_HAPPY)                       # đặt 1 người xong
-    orch.handle_turn("cmp", "modify:start")
-    orch.handle_turn("cmp", "modify:party")
-    r = orch.handle_turn("cmp", "party:2")
+    orch.handle_turn("cmp", "sửa lịch")
+    orch.handle_turn("cmp", "đổi số người")
+    r = orch.handle_turn("cmp", "2 người")
     check(r.state == S.ADDON, f"đổi số người -> hỏi lại add-on, đang {r.state}")
-    orch.handle_turn("cmp", "addon:7")                 # người 1: add-on 7
+    orch.handle_turn("cmp", "Foot")                 # người 1: add-on 7
     orch.handle_turn("cmp", "addon:done")              # xong người 1 -> người 2
-    r = orch.handle_turn("cmp", "addon:none")          # người 2: không thêm -> chốt
+    r = orch.handle_turn("cmp", "không")          # người 2: không thêm -> chốt
     check(r.state == S.SLOT, f"chốt add-on 2 người -> chọn giờ, đang {r.state}")
-    orch.handle_turn("cmp", "slot:14:15")
-    r = orch.handle_turn("cmp", "confirm:yes")
+    orch.handle_turn("cmp", "14:15")
+    r = orch.handle_turn("cmp", "đồng ý đặt")
     check(api.patched_body is not None, "modify party: phải gọi PATCH")
     check(api.patched_body["party_size"] == 2, "PATCH đúng 2 người")
     check([x["addon_ids"] for x in api.patched_body["reservations"]] == [[7], []],
@@ -602,8 +658,8 @@ def test_modify_keep_returns_to_done():
     api = StubApi()
     orch = _orch(api)
     _drive(orch, "ck", *_HAPPY)
-    orch.handle_turn("ck", "modify:start")
-    r = orch.handle_turn("ck", "modify:keep")
+    orch.handle_turn("ck", "sửa lịch")
+    r = orch.handle_turn("ck", "giữ nguyên")
     check(r.state == S.DONE, f"'Giữ nguyên' -> quay lại DONE, đang {r.state}")
     check(orch.store.load("ck").editing is False, "modify:keep tắt cờ editing")
     check(api.patched_body is None, "modify:keep KHÔNG gọi PATCH")
@@ -637,8 +693,8 @@ def test_confirm_by_text_when_llm_flaky_books():
     """Ở CONFIRM, gõ 'đồng ý đặt' khi router hỏng (trả text) -> vẫn đặt được, không REPROMPT."""
     api = StubApi()
     orch = Orchestrator(InMemorySessionStore(), api, _NonJsonLLM(), _settings())
-    _drive(orch, "cflaky", "", "shop:1", f"date:{_FUTURE_DATE}", "party:1",
-           "course:3", "addon:none", "therapist:skip", "slot:14:00", "0901234567 a@b.com")
+    _drive(orch, "cflaky", "", "Shop A", _FUTURE_DATE, "1 người",
+           "Toàn thân", "không", "ai cũng được", "14:00", "0901234567 a@b.com")
     r = orch.handle_turn("cflaky", "đồng ý đặt")
     check(api.created_body is not None, "xác nhận bằng lời (LLM hỏng) vẫn đặt được")
     check(r.state == S.DONE, f"-> DONE, đang {r.state}")
@@ -650,8 +706,8 @@ def test_support_phone_env_takes_priority():
     api.lookup_error = ShopApiError(403, "PHONE_BLOCKED", "SĐT bị chặn.",
                                     {"reason": "x", "shop_phone": "090-1111"})
     orch = Orchestrator(InMemorySessionStore(), api, None, _settings(support_phone="1900-6068"))
-    reply = _drive(orch, "csp", "", "shop:1", f"date:{_FUTURE_DATE}", "party:1",
-                   "course:3", "addon:none", "therapist:skip", "slot:14:00", "0901234567 a@b.com")
+    reply = _drive(orch, "csp", "", "Shop A", _FUTURE_DATE, "1 người",
+                   "Toàn thân", "không", "ai cũng được", "14:00", "0901234567 a@b.com")
     check(reply.state == S.CONTACT, "A5 -> cho thử số khác (CONTACT)")
     check("1900-6068" in reply.reply_text, "hiện số hỗ trợ env")
     check("090-1111" not in reply.reply_text, "không hiện số cửa hàng khi đã có số hỗ trợ env")
@@ -663,14 +719,14 @@ def test_a5_retry_with_another_phone_books():
     api = StubApi()
     api.blocked_phones = {"0779776153"}
     orch = _orch(api)
-    _drive(orch, "cr", "", "shop:1", f"date:{_FUTURE_DATE}", "party:1",
-           "course:3", "addon:none", "therapist:skip", "slot:14:00",
+    _drive(orch, "cr", "", "Shop A", _FUTURE_DATE, "1 người",
+           "Toàn thân", "không", "ai cũng được", "14:00",
            "phamvinh324@gmail.com 0779776153")          # email + số bị chặn
     ses = orch.store.load("cr")
     check(ses.state == S.CONTACT, f"số bị chặn -> xin số khác (CONTACT), đang {ses.state}")
     check(ses.slots.email is not None and ses.vault, "email + vault CÒN nguyên (không bị rút)")
     orch.handle_turn("cr", "0779776154")                # SỐ KHÁC, không nhập lại email
-    r = orch.handle_turn("cr", "confirm:yes")
+    r = orch.handle_turn("cr", "đồng ý đặt")
     check(api.created_body is not None, "số khác không bị chặn -> đặt được")
     check(api.created_body["phone"] == "0779776154", "gửi đúng số mới")
     check(api.created_body["email"] == "phamvinh324@gmail.com",
@@ -700,10 +756,10 @@ def test_modify_after_2min_reasks_email_then_updates():
     orch = _orch(api)
     _drive(orch, "c2m", *_HAPPY)                       # đặt xong
     _expire_edit_window(orch, "c2m")                   # quá 2', vault rút
-    orch.handle_turn("c2m", "modify:start")
-    orch.handle_turn("c2m", "modify:slot")             # đổi giờ
-    orch.handle_turn("c2m", "slot:14:15")
-    r = orch.handle_turn("c2m", "confirm:yes")         # token hết + vault rút -> xin email
+    orch.handle_turn("c2m", "sửa lịch")
+    orch.handle_turn("c2m", "đổi giờ")             # đổi giờ
+    orch.handle_turn("c2m", "14:15")
+    r = orch.handle_turn("c2m", "đồng ý đặt")         # token hết + vault rút -> xin email
     check(api.patched_body is None, "chưa PATCH khi chưa có email")
     check("email" in r.reply_text.lower(), "phải xin lại email để xác thực")
     check(orch.store.load("c2m").awaiting_edit_email is True, "đang chờ email")
@@ -720,7 +776,7 @@ def test_cancel_after_2min_reasks_email():
     orch = _orch(api)
     _drive(orch, "c2c", *_HAPPY)
     _expire_edit_window(orch, "c2c")
-    r = orch.handle_turn("c2c", "cancel:start")        # token hết + vault rút -> xin email
+    r = orch.handle_turn("c2c", "hủy lịch")        # token hết + vault rút -> xin email
     check(api.cancelled_with is None, "chưa hủy khi chưa có email")
     check(orch.store.load("c2c").awaiting_edit_email is True, "đang chờ email để hủy")
     r = orch.handle_turn("c2c", "a@b.com")
@@ -734,10 +790,10 @@ def test_edit_after_2min_wrong_email_then_correct():
     orch = _orch(api)
     _drive(orch, "cw", *_HAPPY)                        # booking email = a@b.com
     _expire_edit_window(orch, "cw")
-    orch.handle_turn("cw", "modify:start")
-    orch.handle_turn("cw", "modify:slot")
-    orch.handle_turn("cw", "slot:14:15")
-    orch.handle_turn("cw", "confirm:yes")              # -> xin email
+    orch.handle_turn("cw", "sửa lịch")
+    orch.handle_turn("cw", "đổi giờ")
+    orch.handle_turn("cw", "14:15")
+    orch.handle_turn("cw", "đồng ý đặt")              # -> xin email
     orch.handle_turn("cw", "wrong@b.com")              # email SAI
     check(api.patched_body is None, "email sai -> chưa PATCH")
     ses = orch.store.load("cw")
@@ -776,7 +832,7 @@ def test_done_shows_quick_edit_countdown():
     check(r.state == S.DONE, "đặt xong -> DONE")
     check("Sửa/hủy nhanh" in r.reply_text and ":" in r.reply_text,
           "DONE hiện đồng hồ sửa nhanh (m:ss)")
-    menu = orch.handle_turn("cq", "modify:start")
+    menu = orch.handle_turn("cq", "sửa lịch")
     check("Sửa/hủy nhanh" in menu.reply_text, "menu MODIFY cũng nhắc cửa sổ sửa nhanh")
 
 
@@ -793,28 +849,36 @@ def test_quick_edit_note_live_and_expired():
     check(nlg._quick_edit_note(ses) == "", "chưa có mốc -> không hiện gì")
 
 
-def test_buttons_localized_by_lang():
-    """Nhãn nút tĩnh đổi theo ngôn ngữ; value (token) GIỮ NGUYÊN để logic không đổi."""
-    from app.buttons import buttons_for
-    from app.session import Session as Ses, Slots as Sl
+def test_reply_localized_by_lang():
+    """Câu trả lời đổi theo ngôn ngữ, và vẫn ĐỌC đủ danh sách lựa chọn ra (không còn nút)."""
+    from app import nlg
+    from app.session import Session as Ses
 
-    b_en = buttons_for(S.CONFIRM, Ses(conversation_id="c", lang="en"), {})
-    check({x["label"] for x in b_en} == {"Confirm booking", "Edit"}, "CONFIRM en -> nhãn tiếng Anh")
-    check({x["value"] for x in b_en} == {"confirm:yes", "confirm:no"}, "value giữ nguyên bất kể ngôn ngữ")
+    ar = {"shops": [{"name": "Shop A"}, {"name": "Shop B"}]}
+    vi = nlg.generate(nlg.build_prompt("SHOP", Ses(conversation_id="c", lang="vi"), ar, "vi"), None)
+    check("Shop A" in vi and "Shop B" in vi, "vi: đọc đủ tên cửa hàng")
 
-    b_ja = buttons_for(S.THERAPIST, Ses(conversation_id="c", lang="ja"), {"therapists": []})
-    check(any(x["label"] == "おまかせ" and x["value"] == "therapist:skip" for x in b_ja),
-          "THERAPIST ja -> 'おまかせ' (value therapist:skip)")
+    en = nlg.generate(nlg.build_prompt("SHOP", Ses(conversation_id="c", lang="en"), ar, "en"), None)
+    check("Shop A" in en and "shop" in en.lower(), "en: câu tiếng Anh, vẫn đủ lựa chọn")
 
-    b_mod = buttons_for(S.MODIFY, Ses(conversation_id="c", lang="en"), {})
-    check(any(x["label"] == "Change time" and x["value"] == "modify:slot" for x in b_mod),
-          "MODIFY en -> 'Change time'")
+    # Ngôn ngữ KHÔNG hỗ trợ (đã bỏ tiếng Nhật) -> lùi về 'vi' thay vì vỡ template.
+    other = nlg.generate(nlg.build_prompt("SHOP", Ses(conversation_id="c", lang="ja"), ar, "ja"), None)
+    check("Shop A" in other, "ngôn ngữ không hỗ trợ -> lùi về tiếng Việt, không mất dữ liệu")
 
-    ses = Ses(conversation_id="c", lang="en",
-              slots=Sl(party_size=2, course_id=3, guest_addons=[[7], []], addon_guest_idx=0))
-    ar = {"addons": [{"id": 7, "name": "Aroma", "duration_min": 30, "price": 1, "restricted_course_ids": []}]}
-    done = [x for x in buttons_for(S.ADDON, ses, ar) if x["value"] == "addon:done"][0]
-    check("Done" in done["label"] and "guest 1" in done["label"], "ADDON en nhóm -> '✅ Done (guest 1) →'")
+
+def test_slot_by_spoken_time():
+    """Nói giờ còn trống -> chốt luôn; nói giờ đã kín -> mời chọn lại, không chốt bừa."""
+    api = StubApi()                                    # slots: 14:00, 14:15, 15:00
+    orch = _orch(api)
+    _drive(orch, "cst", "", "Shop A", _FUTURE_DATE, "1 người",
+           "Toàn thân", "không", "ai cũng được")
+    r = orch.handle_turn("cst", "16:30")               # giờ KHÔNG có trong danh sách
+    check(orch.store.load("cst").slots.slot is None, "giờ không trống -> không chốt")
+    check(r.state == S.SLOT, "vẫn ở bước chọn giờ")
+    check("14:00" in r.reply_text, "đọc lại các giờ còn trống")
+    r = orch.handle_turn("cst", "14:15")               # giờ CÓ trong danh sách
+    check(orch.store.load("cst").slots.slot == "14:15", "nói đúng giờ trống -> chốt luôn")
+
 
 
 def run_all():

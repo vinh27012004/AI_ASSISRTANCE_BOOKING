@@ -3,20 +3,15 @@
 - next_state: state đầu tiên (theo STATE_ORDER) còn thiếu slot, bỏ qua state không đủ
   điều kiện vào (vd THERAPIST khi nhóm >1 — BR-04).
 - merge_params: gộp entity NLU đã trích vào slots + XÓA slot mâu thuẫn (BR-04/BR-07).
-- apply_button: token "key:value" từ nút bấm -> slots (tất định, KHÔNG qua LLU/LLM,
-  giảm NLU sai — §7/§10).
+
+KHÔNG còn nút bấm: mọi lựa chọn đến từ lời khách qua NLU. Các `*_text` là gợi ý thô, phải
+map về id ở orchestrator (._match_*) mới dùng được.
 """
 
 from __future__ import annotations
 
 from app.session import Session
 from app import states as S
-
-KNOWN_BUTTON_KEYS = {
-    "shop", "date", "party", "duration", "course",
-    "addon", "slot", "therapist", "confirm", "handoff",
-    "modify", "cancel", "lang",
-}
 
 
 def next_state(session: Session) -> str:
@@ -45,6 +40,14 @@ def merge_params(session: Session, entities: dict) -> None:
         if getattr(s, field) != value:
             setattr(s, field, value)
             changed.add(field)
+
+    shop = entities.get("shop")
+    # Chỉ nhận gợi ý shop khi CHƯA chọn — shop là gốc của mọi dữ liệu sau đó (ngày/course/
+    # slot đều theo shop), đổi giữa chừng cần invalidate dây chuyền nên chưa hỗ trợ (khác
+    # course: đổi course giữa chừng chỉ cần reset add-on/slot). Khách muốn đổi shop thì bắt
+    # đầu lại phiên mới.
+    if shop and s.shop_id is None:
+        s.shop_text = str(shop)         # map id qua GET /shops (orchestrator._match_shop)
 
     date = entities.get("date")
     if date:
@@ -80,6 +83,12 @@ def merge_params(session: Session, entities: dict) -> None:
         if s.course_id is not None:          # khách đổi course giữa chừng -> map lại từ đầu
             s.course_id = None
             changed.add("course_id")
+
+    addons = entities.get("addons")
+    if addons:
+        # Tên add-on khách nói -> gợi ý thô, map id ở orchestrator._match_addons (BR-10:
+        # gán cho ĐÚNG người đang hỏi, nên không đụng guest_addons ở đây).
+        s.addon_texts = [str(a) for a in addons if a]
 
     ther = entities.get("therapist")
     if ther:
@@ -117,7 +126,7 @@ def _invalidate(session: Session, changed: set[str]) -> None:
     # Đổi course (add-on cũ chưa chắc còn kèm được — BR-09) hoặc đổi số người (cấu trúc
     # add-on theo từng người thay đổi) -> chọn lại add-on từ đầu.
     if changed & {"course_id", "party_size"}:
-        _reset_addons(s)
+        reset_addons(s)
     if "course_id" in changed:
         s.course_name = None
     # BR-07: đổi course/party/date -> slot cũ chưa chắc còn hợp lệ, buộc chọn lại.
@@ -127,109 +136,47 @@ def _invalidate(session: Session, changed: set[str]) -> None:
 
 
 # --------------------------------------------------------------------------- #
-#  Button tokens (nút bấm)                                                     #
+#  Sửa lịch đã đặt (UC-02) — khách nói "đổi giờ"/"đổi số người"/…              #
 # --------------------------------------------------------------------------- #
 
-def is_button_token(text: str) -> bool:
-    t = (text or "").strip()
-    if ":" not in t:
-        return False
-    key = t.split(":", 1)[0]
-    return " " not in key and key in KNOWN_BUTTON_KEYS
-
-
-def apply_button(session: Session, text: str) -> str | None:
-    """Áp token nút vào slots. Trả tín hiệu cho orchestrator ('handoff'/'modify_menu'/
-    'cancel') hoặc None nếu token thường."""
+def apply_modify_target(session: Session, target: str) -> None:
+    """Xóa slot tương ứng phần khách muốn đổi, để vòng hỏi quay lại đúng bước đó.
+    `target` lấy từ nlu.detect_modify_target ('slot'|'party'|'course'|'keep')."""
     s = session.slots
-    key, _, value = text.strip().partition(":")
-    changed: set[str] = set()
+    if target == "keep":                         # thôi, giữ nguyên -> quay lại DONE
+        session.editing = False
+        return
 
-    if key == "handoff":
-        return "handoff"
-
-    if key == "lang":                            # khách chọn ngôn ngữ ở màn chào
-        if value in ("vi", "en", "ja"):
-            session.lang = value
-            session.lang_locked = True           # đã chọn -> ngừng tự đoán (§7)
-        return None
-
-    # --- Sửa/hủy lịch đã đặt (UC-02/03) ---
-    if key == "modify":
-        if value == "start":
-            session.editing = True
-            return "modify_menu"
-        if value == "keep":                          # thôi, giữ nguyên -> quay lại DONE
-            session.editing = False
-            return None
-        session.editing = True
-        if value == "slot":
-            s.slot = None; s.confirm = None
-        elif value == "party":
-            # Đổi số người -> cấu trúc add-on theo TỪNG người đổi, phải chọn lại từ đầu (BR-10);
-            # nhóm ≥2 không được chỉ định therapist (BR-04) nên bỏ luôn chỉ định.
-            s.party_size = None; s.slot = None; s.confirm = None
-            s.therapist_id = None; s.therapist_gender = None; s.therapist_decided = False
-            _reset_addons(s)
-        elif value == "course":
-            # Đổi course -> add-on cũ chưa chắc còn kèm được (BR-09), chọn lại từ đầu.
-            # (trước đây gán s.addons=[] — Slots KHÔNG có field đó, add-on không hề được reset.)
-            s.course_id = None; s.course_name = None
-            _reset_addons(s)
-            s.slot = None; s.confirm = None
-        return None
-    if key == "cancel" and value == "start":
-        return "cancel"
-
-    if key == "shop":
-        s.shop_id = _to_int(value); changed.add("shop_id")
-    elif key == "date":
-        s.date = value; changed.add("date")
-    elif key == "party":
-        n = _to_int(value)
-        if n and n > 3:
-            s.party_over = True
-        elif n:
-            s.party_over = False
-            s.party_size = n; changed.add("party_size")
-    elif key == "course":
-        s.course_id = _to_int(value); changed.add("course_id")
-    elif key == "addon":
-        s.ensure_guest_addons()                      # add-on RIÊNG từng người (BR-10)
-        idx = min(s.addon_guest_idx, len(s.guest_addons) - 1)
-        if value == "done":                          # xong người này -> người kế / chốt hết
-            _advance_addon_guest(s)
-        elif value in ("none", "skip"):              # người này không thêm
-            s.guest_addons[idx] = []
-            _advance_addon_guest(s)
-        else:
-            aid = _to_int(value)
-            if aid is not None:
-                cur = s.guest_addons[idx]
-                if aid in cur:
-                    cur.remove(aid)
-                else:
-                    cur.append(aid)
-    elif key == "slot":
-        s.slot = value; changed.add("slot")
-    elif key == "therapist":
-        if value == "skip":
-            s.therapist_id = None; s.therapist_gender = None
-        elif value in ("male", "female"):
-            s.therapist_gender = value; s.therapist_id = None
-        else:
-            s.therapist_id = _to_int(value); s.therapist_gender = None
-        s.therapist_decided = True
-        # Giờ trống phụ thuộc người phục vụ -> đổi người thì chọn lại giờ.
+    session.editing = True
+    if target == "slot":
         s.slot = None; s.confirm = None
-    elif key == "confirm":
-        s.confirm = "yes" if value == "yes" else "no"
+    elif target == "party":
+        # Đổi số người -> cấu trúc add-on theo TỪNG người đổi, phải chọn lại từ đầu (BR-10);
+        # nhóm ≥2 không được chỉ định therapist (BR-04) nên bỏ luôn chỉ định.
+        s.party_size = None; s.slot = None; s.confirm = None
+        s.therapist_id = None; s.therapist_gender = None; s.therapist_decided = False
+        reset_addons(s)
+    elif target == "course":
+        # Đổi course -> add-on cũ chưa chắc còn kèm được (BR-09), chọn lại từ đầu.
+        s.course_id = None; s.course_name = None
+        reset_addons(s)
+        s.slot = None; s.confirm = None
 
-    _invalidate(session, changed)
-    return None
+
+# --------------------------------------------------------------------------- #
+#  Add-on theo từng người (BR-10)                                              #
+# --------------------------------------------------------------------------- #
+
+def skip_addon_guest(session: Session) -> None:
+    """Người hiện tại KHÔNG thêm add-on -> sang người kế (hoặc chốt nếu là người cuối)."""
+    s = session.slots
+    s.ensure_guest_addons()
+    idx = min(s.addon_guest_idx, len(s.guest_addons) - 1)
+    s.guest_addons[idx] = []
+    advance_addon_guest(s)
 
 
-def _reset_addons(s) -> None:
+def reset_addons(s) -> None:
     """Xóa toàn bộ trạng thái chọn add-on -> hỏi lại từ người 1 (BR-10). Dùng khi đổi
     course/số người, kể cả lúc sửa lịch."""
     s.guest_addons = []
@@ -237,17 +184,10 @@ def _reset_addons(s) -> None:
     s.addon_guest_idx = 0
 
 
-def _advance_addon_guest(s) -> None:
+def advance_addon_guest(s) -> None:
     """Chuyển sang người kế tiếp để chọn add-on; hết người thì chốt (addons_decided)."""
     n = s.party_size or 1
     if s.addon_guest_idx < n - 1:
         s.addon_guest_idx += 1
     else:
         s.addons_decided = True
-
-
-def _to_int(value: str) -> int | None:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None

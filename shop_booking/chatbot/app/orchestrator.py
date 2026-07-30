@@ -1,7 +1,11 @@
 """Dialog Orchestrator — vòng xử lý 1 lượt (chatbot-architecture.md §1, DD §3.1).
 
 LLM CHỈ ở ①(NLU) và ⑥(NLG). Bước ②③④⑤ là code thuần (test không cần LLM — §9).
-Ngoài ra: token nút bấm đi đường tất định (không NLU/không PII); PII mask bao quanh ①⑥.
+PII mask bao quanh ①⑥.
+
+KHÔNG còn nút bấm: khách chỉ trả lời bằng lời, nên mọi lựa chọn đi qua NLU rồi được code
+map về id (._match_*). Vài câu trả lời chỉ hiểu được theo NGỮ CẢNH state (số trần ở bước
+DATE, "không" ở bước ADDON, "đổi giờ" khi đang sửa lịch) — xử lý ngay trong handle_turn.
 """
 
 from __future__ import annotations
@@ -13,11 +17,15 @@ from dataclasses import dataclass, field
 from app import nlg, nlu, pii
 from app import state_machine as sm
 from app import states as S
-from app.buttons import buttons_for
 from app.config import Settings
 from app.llm_client import RealLLMClient
 from app.session import Session, SessionStore
 from app.shop_api_client import ShopApiClient, ShopApiError
+
+
+# Bước mà câu trả lời của khách là TÊN lấy từ dữ liệu (shop/course/add-on/nhân viên), không
+# phải câu nói bình thường -> không dùng để đoán ngôn ngữ.
+_LANG_NEUTRAL_STATES = {S.SHOP, S.COURSE, S.ADDON, S.THERAPIST}
 
 
 @dataclass
@@ -25,6 +33,8 @@ class BotReply:
     conversation_id: str
     reply_text: str
     state: str
+    # Giữ `ui.buttons` (luôn rỗng) để widget FE hiện tại đọc `reply.ui.buttons` không vỡ —
+    # bỏ hẳn field sẽ làm FE ném TypeError. Bot đọc lựa chọn thẳng trong reply_text.
     ui: dict = field(default_factory=lambda: {"buttons": []})
     done: bool = False
 
@@ -54,24 +64,30 @@ class Orchestrator:
         if lang_hint:
             session.lang = lang_hint
 
-        # Mở chat (text rỗng) -> chào + mời chọn ngôn ngữ (khỏi đoán — §7).
+        # Mở chat (text rỗng) -> câu chào.
         if not (user_text or "").strip():
             return self._greeting(session)
 
         # Đang chờ khách NHẬP LẠI EMAIL để xác thực sửa/hủy sau cửa sổ 2' (BR-15) — dòng này
         # là email khách gõ, không phải câu đặt lịch: nạp email rồi làm nốt thao tác đang chờ.
-        if session.awaiting_edit_email and not sm.is_button_token(user_text):
+        if session.awaiting_edit_email:
             return self._resume_with_edit_email(session, user_text)
 
-        # Token nút: tất định, bỏ qua NLU + PII (giá trị đã là id/giờ, không phải câu nói).
-        if sm.is_button_token(user_text):
-            signal = sm.apply_button(session, user_text)
-            if signal == "handoff":
-                return self._handoff(session)
-            if signal == "modify_menu":                # nút "Sửa lịch" -> menu đổi gì (UC-02)
-                return self._reply(session, S.MODIFY, {})
-            if signal == "cancel":                     # nút "Hủy lịch" (UC-03)
-                return self._cancel(session)
+        # State bot ĐANG hỏi — suy từ slots nên đúng cả khi state đã lưu chưa kịp cập nhật
+        # (vd ngay sau câu chào). Cần để hiểu những câu chỉ có nghĩa trong ngữ cảnh câu hỏi:
+        # "31" = ngày, "Shop A" = tên cửa hàng, "không" = không thêm add-on.
+        asked = sm.next_state(session)
+
+        # Khách CHỌN ngôn ngữ bằng LỜI ("Tiếng Việt"/"English"). Bỏ qua NLU: cả câu chỉ là
+        # tên ngôn ngữ, không có tham số gì để trích (khỏi tốn một lượt gọi LLM vô ích).
+        if (lang_choice := nlu.detect_lang_choice(user_text)) is not None:
+            session.lang = lang_choice
+            session.lang_locked = True
+        # Đang ở menu "đổi gì" (UC-02): câu này là chọn phần muốn đổi, không phải câu đặt mới.
+        elif session.editing and nlu.is_cancel_request(user_text):
+            return self._cancel(session)
+        elif session.editing and (target := nlu.detect_modify_target(user_text)) is not None:
+            sm.apply_modify_target(session, target)
         else:
             # ① NLU (LLM) — mask PII trước khi ra LLM (bước ⑥.1 của masker).
             extra = [session.booking_code] if session.booking_code else None
@@ -82,7 +98,11 @@ class Orchestrator:
             if parsed is None:                       # sai schema -> hỏi lại (§3.4)
                 return self._reply(session, "REPROMPT", {})
 
-            if not session.lang_locked:            # đã chọn ngôn ngữ thì tôn trọng, không đoán
+            # Đã chọn ngôn ngữ thì tôn trọng, không đoán. Cũng KHÔNG đoán ở các bước chọn từ
+            # danh sách: câu trả lời khi đó là TÊN dữ liệu của mình ("Shop A", "Foot") —
+            # toàn chữ Latin nhưng không phải tín hiệu tiếng Anh, đoán theo sẽ làm bot lật
+            # qua lại vi/en giữa chừng hội thoại.
+            if not session.lang_locked and asked not in _LANG_NEUTRAL_STATES:
                 lang = nlu.detect_lang(user_text)
                 if lang:
                     session.lang = lang
@@ -106,10 +126,18 @@ class Orchestrator:
 
             # Đang hỏi NGÀY mà khách trả lời số trần ("31") hay "31/7" — NLU stateless bỏ số
             # trần để khỏi nhầm với số người; ở đây có ngữ cảnh nên diễn giải thành ngày.
-            if session.state == S.DATE and session.slots.date is None:
+            if asked == S.DATE and session.slots.date is None:
                 iso = nlu.parse_date_freeform(user_text, allow_bare_day=True)
                 if iso:
                     sm.merge_params(session, {"date": iso})
+
+            # Đang hỏi ADD-ON mà khách nói "không"/"thôi" -> người này không thêm, sang người
+            # kế (BR-10). Chỉ hiểu được theo ngữ cảnh: cùng chữ "không" ở bước CONFIRM lại
+            # mang nghĩa từ chối đơn.
+            if asked == S.ADDON and nlu.is_negative(user_text):
+                sm.skip_addon_guest(session)
+            else:
+                self._capture_choice_text(session, asked, user_text)
 
         # Nhóm >3 -> handoff (BR-14 / A8), không cần gọi BE.
         if session.slots.party_over:
@@ -132,11 +160,17 @@ class Orchestrator:
         s = session.slots
         try:
             if st == S.SHOP:
-                return {"shops": pii.mask_response(self._get_shops())}
+                shops = self._get_shops()
+                if self._match_shop(session, shops):
+                    # Khách đã nêu tên cửa hàng ("Sendai") -> map xong thì khỏi hỏi lại,
+                    # tiến thẳng sang state kế (khách nói tên là đủ, không phải chọn lại).
+                    session.state = sm.next_state(session)
+                    return self._run_state_action(session)
+                return {"shops": pii.mask_response(shops)}
 
             if st == S.DATE:
-                # Nút ngày = ngày cửa hàng THỰC SỰ có ca (không mời ngày shop nghỉ). Không dò
-                # được (API lỗi) -> active=None, buttons tự lùi về hôm nay..+3.
+                # Chỉ mời ngày cửa hàng THỰC SỰ có ca. Không dò được (API lỗi) -> active=None,
+                # câu hỏi lùi về hỏi chung chung, không đọc danh sách ngày.
                 active = self._available_dates(s.shop_id)
                 if active is not None and not active:         # shop không có ca suốt horizon
                     s.shop_id = None                          # -> mời chọn cửa hàng khác
@@ -150,22 +184,44 @@ class Orchestrator:
             if st == S.COURSE:
                 data = self.api.get_services(s.shop_id, s.date, s.party_size)
                 if data.get("reason") == "SHOP_CLOSED":           # A1 (200 rỗng, không phải lỗi)
+                    from datetime import date as _date, timedelta as _td
+
                     s.date = None
                     session.state = S.DATE
                     active = self._available_dates(s.shop_id)
-                    msg = ("Cửa hàng không phục vụ ngày này. "
-                           + ("Anh/chị chọn giúp một trong các ngày có làm bên dưới nhé."
-                              if active else "Mời anh/chị chọn ngày khác."))
+                    # Không còn nút -> ĐỌC thẳng các ngày có làm trong 7 ngày tới cho khách
+                    # chọn lại ngay; 7 ngày tới không có thì đọc các ngày xa hơn còn dò được.
+                    horizon = (_date.today() + _td(days=7)).isoformat()
+                    week = nlg.format_date_list([d for d in (active or []) if d <= horizon])
+                    if week:
+                        msg = ("Cửa hàng không phục vụ ngày này. Trong 7 ngày tới cửa hàng "
+                               f"có làm các ngày: {week}. Anh/chị chọn giúp một ngày nhé.")
+                    elif active:
+                        msg = ("Cửa hàng không phục vụ ngày này. Cửa hàng có làm các ngày: "
+                               f"{nlg.format_date_list(active)}. Anh/chị chọn giúp một ngày nhé.")
+                    else:
+                        msg = "Cửa hàng không phục vụ ngày này. Mời anh/chị chọn ngày khác."
                     return {"render_key": "ERROR", "message": msg, "active_dates": active}
-                self._match_course(session, data.get("courses", []))
-                self._cache_course(session, data.get("courses", []))
-                return {"courses": data.get("courses", [])}
+                courses = data.get("courses", [])
+                matched = self._match_course(session, courses)
+                self._cache_course(session, courses)
+                if matched:
+                    # Khách đọc tên gói ("Toàn thân") -> chốt luôn, khỏi hỏi lại.
+                    session.state = sm.next_state(session)
+                    return self._run_state_action(session)
+                return {"courses": courses}
 
             if st == S.ADDON:                                     # bước RIÊNG: add-on từng người
                 s.ensure_guest_addons()                           # BR-10: mỗi người 1 danh sách
                 data = self.api.get_services(s.shop_id, s.date, s.party_size)
                 self._cache_course(session, data.get("courses", []))
-                return {"addons": data.get("addons", [])}
+                addons = data.get("addons", [])
+                if self._match_addons(session, addons):
+                    # Khách đã đọc tên add-on -> gán cho người đang hỏi rồi sang người kế,
+                    # khỏi hỏi lại (không có nút "✅ Xong" để bấm nữa).
+                    session.state = sm.next_state(session)
+                    return self._run_state_action(session)
+                return {"addons": addons}
 
             if st == S.SLOT:
                 data = self.api.get_slots(
@@ -187,6 +243,13 @@ class Orchestrator:
                     session.state = S.DATE
                     return {"render_key": "ERROR",
                             "message": "Ngày này không còn khung giờ trống, anh/chị chọn giúp ngày khác nhé."}
+                # Khách đã NÓI đúng một giờ còn trống -> chốt luôn, khỏi hỏi lại (thay cho
+                # nút giờ trước đây). Giờ khách nói mà kín lịch thì rơi xuống mời chọn lại.
+                if s.wanted_time and s.wanted_time in slots:
+                    s.slot = s.wanted_time
+                    s.wanted_time = None
+                    session.state = sm.next_state(session)
+                    return self._run_state_action(session)
                 return {"slots": self._order_slots(slots, s.wanted_time)}
 
             if st == S.THERAPIST:
@@ -454,7 +517,7 @@ class Orchestrator:
                 "message": e.message or "Hệ thống đang bận, anh/chị thử lại sau giây lát nhé."}
 
     # ------------------------------------------------------------------ #
-    #  Handoff (MVP: chỉ nút gọi cửa hàng — Q9)                           #
+    #  Handoff (MVP: chỉ đọc số cửa hàng cho khách gọi — Q9)              #
     # ------------------------------------------------------------------ #
     def _handoff(self, session: Session, reason_party: bool = False) -> BotReply:
         phone = self._contact_phone(session)
@@ -463,44 +526,43 @@ class Orchestrator:
                            {"message": message, "shop_phone": phone})
 
     # ------------------------------------------------------------------ #
-    #  Màn chào — mời chọn ngôn ngữ (khỏi đoán, §7)                       #
+    #  Màn chào                                                           #
     # ------------------------------------------------------------------ #
     def _greeting(self, session: Session) -> BotReply:
-        # Câu chào cố định 3 thứ tiếng (không qua LLM để không tự đoán ngôn ngữ). Nói rõ đây
-        # là trợ lý AI ngay từ đầu — yêu cầu minh bạch APPI (§6.3.4).
+        # Câu chào cố định (không qua LLM để không tự đoán ngôn ngữ). Nói rõ đây là trợ lý AI
+        # ngay từ đầu — yêu cầu minh bạch APPI (§6.3.4). Không còn nút chọn ngôn ngữ: chào
+        # song ngữ rồi tự nhận ngôn ngữ theo câu khách trả lời (detect_lang), khách nói
+        # "English"/"Tiếng Việt" giữa chừng vẫn đổi được (detect_lang_choice).
+        # Kèm luôn danh sách cửa hàng để khách chọn được ngay từ câu đầu; tên cửa hàng là
+        # DỮ LIỆU nên chỉ đọc một dòng chung, không dịch. API lỗi -> vẫn chào bình thường.
+        try:
+            names = ", ".join(sh["name"] for sh in self._get_shops())
+        except ShopApiError:
+            names = ""
+        shops_line = f"\n🏬 Cửa hàng / Shops: {names}." if names else ""
         text = (
-            "Xin chào 👋 Em là trợ lý đặt lịch AI. Vui lòng chọn ngôn ngữ.\n"
-            "Hi! I'm the AI booking assistant. Please choose your language.\n"
-            "こんにちは！AI予約アシスタントです。言語をお選びください。"
+            "Xin chào 👋 Em là trợ lý đặt lịch AI, em giúp anh/chị đặt lịch massage ạ. "
+            "Anh/chị muốn đặt ở cửa hàng nào ạ?\n"
+            "Hi! I'm the AI booking assistant — which shop would you like to book?"
+            f"{shops_line}"
         )
-        buttons = [
-            {"label": "Tiếng Việt", "value": "lang:vi"},
-            {"label": "English", "value": "lang:en"},
-            {"label": "日本語", "value": "lang:ja"},
-        ]
         session.history.append({"role": "bot", "masked_text": text})
         self.store.save(session)
         return BotReply(
             conversation_id=session.conversation_id,
             reply_text=text,
             state=session.state,
-            ui={"buttons": buttons},
             done=False,
         )
 
     # ------------------------------------------------------------------ #
-    #  ⑤⑥ dựng câu + nút, unmask, lưu session                            #
+    #  ⑤⑥ dựng câu, unmask, lưu session                                  #
     # ------------------------------------------------------------------ #
     def _reply(self, session: Session, render_key: str, api_result: dict) -> BotReply:
         prompt = nlg.build_prompt(render_key, session, api_result, session.lang)
         reply = nlg.generate(prompt, self.llm)                     # ⑥ NLG (LLM hoặc fake)
         session.history.append({"role": "bot", "masked_text": reply})
         reply = pii.unmask(reply, session.vault)                   # trả PII thật cho widget khách
-
-        # Nút hiển thị theo render_key cho các "màn" đặc biệt (menu sửa, gọi cửa hàng);
-        # còn lại theo state resume.
-        buttons_state = render_key if render_key in (S.END, "HANDOFF", S.MODIFY) else session.state
-        buttons = buttons_for(buttons_state, session, api_result)
 
         session.maybe_drop_vault()                                 # Q5: rút vault sau 2'F
         self.store.save(session)
@@ -509,7 +571,6 @@ class Orchestrator:
             conversation_id=session.conversation_id,
             reply_text=reply,
             state=session.state,
-            ui={"buttons": buttons},
             done=S.is_terminal(session.state),
         )
 
@@ -529,16 +590,88 @@ class Orchestrator:
         if not s.email:
             s.email = next((k for k in session.vault if k.startswith("{{email_")), None)
 
-    def _match_course(self, session: Session, courses: list[dict]) -> None:
-        """Map course_text (gợi ý NLU) -> course_id nếu tên khớp; nếu không, để khách bấm nút."""
+    def _match_course(self, session: Session, courses: list[dict]) -> bool:
+        """Map course_text (gợi ý NLU) -> course_id nếu tên khớp; không khớp thì hỏi lại."""
         s = session.slots
         if s.course_id or not s.course_text:
-            return
+            return False
         text = s.course_text.lower()
+        s.course_text = None                  # tiêu thụ xong, tránh map lại ở lượt sau
         for c in courses:
             if text in c["name"].lower() or c["name"].lower() in text:
                 s.course_id = c["id"]
-                return
+                return True
+        return False
+
+    @staticmethod
+    def _capture_choice_text(session: Session, asked: str, user_text: str) -> None:
+        """Ở các bước CHỌN TỪ DANH SÁCH, cả câu khách nói chính là tên mục muốn chọn -> lấy
+        làm gợi ý thô cho _match_* map về id.
+
+        Cần vì NLU rule-based (chạy khi chưa cấu hình LLM, hoặc LLM lỗi) KHÔNG biết tên cửa
+        hàng/course/add-on — chúng đến từ API chứ không nằm sẵn trong luật. Chỉ ghi khi
+        NLU chưa cho gợi ý nào, để kết quả LLM (chính xác hơn) được ưu tiên."""
+        s = session.slots
+        text = (user_text or "").strip()
+        if not text:
+            return
+        if asked == S.SHOP and s.shop_id is None and not s.shop_text:
+            s.shop_text = text
+        elif asked == S.COURSE and s.course_id is None and not s.course_text:
+            s.course_text = text
+        elif asked == S.ADDON and not s.addon_texts:
+            s.addon_texts = [text]
+        elif asked == S.THERAPIST and not s.therapist_decided and not s.therapist_text:
+            s.therapist_text = text
+
+    @staticmethod
+    def _match_addons(session: Session, addons: list[dict]) -> bool:
+        """Map tên add-on khách đọc (addon_texts) -> id, gán cho ĐÚNG người đang hỏi (BR-10)
+        rồi sang người kế. Trả True nếu đã chốt được cho người này.
+
+        Add-on cấm với course đang chọn (BR-09) bị bỏ qua — không mời thì cũng không nhận."""
+        s = session.slots
+        if not s.addon_texts:
+            return False
+        wanted = [t.strip().lower() for t in s.addon_texts if t and t.strip()]
+        s.addon_texts = []                    # tiêu thụ xong, tránh gán lại cho người kế
+        if not wanted:
+            return False
+
+        picked: list[int] = []
+        for a in addons:
+            if s.course_id and s.course_id in (a.get("restricted_course_ids") or []):
+                continue
+            name = (a.get("name") or "").lower()
+            if not name:
+                continue
+            if any(t == name or t in name or name in t for t in wanted):
+                picked.append(a["id"])
+        if not picked:                        # đọc tên không khớp add-on nào -> hỏi lại
+            return False
+
+        s.ensure_guest_addons()
+        idx = min(s.addon_guest_idx, len(s.guest_addons) - 1)
+        s.guest_addons[idx] = picked
+        sm.advance_addon_guest(s)
+        return True
+
+    @staticmethod
+    def _match_shop(session: Session, shops: list[dict]) -> bool:
+        """Map tên cửa hàng khách nêu (shop_text, vd 'Sendai') -> shop_id. Khớp -> chọn luôn,
+        khỏi hỏi lại. Không khớp -> bỏ gợi ý để bot đọc lại danh sách cho khách chọn."""
+        s = session.slots
+        if s.shop_id is not None or not s.shop_text:
+            return False
+        text = s.shop_text.strip().lower()
+        for sh in shops:
+            name = sh["name"].lower()
+            if text == name or text in name or name in text:
+                s.shop_id = sh["id"]
+                s.shop_text = None
+                return True
+        s.shop_text = None
+        return False
 
     @staticmethod
     def _match_therapist(session: Session, therapists: list[dict]) -> bool:
@@ -557,7 +690,7 @@ class Orchestrator:
                 s.therapist_text = None       # đã dùng xong -> tránh map lại (vd khi kín lịch)
                 s.slot = None; s.confirm = None
                 return True
-        s.therapist_text = None               # tên không khớp ai -> để khách bấm nút
+        s.therapist_text = None               # tên không khớp ai -> bot đọc lại danh sách
         return False
 
     @staticmethod
@@ -643,7 +776,7 @@ class Orchestrator:
         has_shifts của GET /services). Lấy trong MỘT lần gọi GET /shops/{id}/availability.
 
         Trả list ISO (có thể RỖNG = shop nghỉ suốt horizon) khi gọi được; None khi lỗi API
-        để nút ngày lùi về mặc định thay vì tưởng shop đóng cửa. Cache 5'/shop."""
+        để câu hỏi ngày lùi về hỏi chung chung thay vì tưởng shop đóng cửa. Cache 5'/shop."""
         if not shop_id:
             return None
         from datetime import date as _date, timedelta as _td
@@ -658,7 +791,7 @@ class Orchestrator:
         try:
             data = self.api.get_availability(shop_id, today.isoformat(), to.isoformat())
         except ShopApiError:
-            return None                         # không rõ -> để buttons dùng ngày mặc định
+            return None                         # không rõ -> không đọc danh sách ngày
 
         open_days = data.get("open_dates") or []
         self._avail_cache[shop_id] = (now, open_days)

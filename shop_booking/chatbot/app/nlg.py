@@ -11,21 +11,27 @@ widget của chính khách.
 from __future__ import annotations
 
 import json
+import logging
 import time
 
 from app import pii, templates
 from app.llm_client import LLMError, RealLLMClient
 from app.session import Session
 
+logger = logging.getLogger(__name__)
+
 _NLG_SYSTEM = (
     "Bạn là trợ lý đặt lịch massage, nói chuyện lịch sự, ngắn gọn. Diễn đạt TỰ NHIÊN bằng "
     "ngôn ngữ 'lang'. CHỈ dùng dữ kiện trong 'facts'; TUYỆT ĐỐI KHÔNG bịa giá, dịch vụ hay "
     "khung giờ không có.\n"
-    "Các lựa chọn cho khách (cửa hàng, course, giờ...) ĐÃ được hiển thị bằng NÚT bên dưới câu "
-    "trả lời — vì vậy CHỈ hỏi ngắn gọn, KHÔNG liệt kê lại danh sách trong câu.\n"
-    "TUYỆT ĐỐI KHÔNG tự tạo chỗ trống dạng {{...}} (không viết {{buttons}}, {{courses}}, "
-    "{{slots}}...). Chỉ khi trong 'facts' CÓ SẴN placeholder PII như {{phone_1}} thì giữ NGUYÊN "
-    "VĂN nó. Trả về DUY NHẤT câu trả lời cho khách, không kèm giải thích."
+    "Khách KHÔNG có nút để bấm, chỉ trả lời bằng lời — nên khi 'facts' có danh sách lựa chọn "
+    "(cửa hàng, gói dịch vụ, giờ trống, nhân viên...) thì PHẢI ĐỌC RÕ các lựa chọn đó trong "
+    "câu, ĐẦY ĐỦ và ĐÚNG NGUYÊN VĂN, để khách biết mà chọn.\n"
+    "TUYỆT ĐỐI KHÔNG tự tạo chỗ trống dạng {{...}} (không viết {{courses}}, {{slots}}...). "
+    "Chỉ khi trong 'facts' CÓ SẴN placeholder PII như {{phone_1}} thì giữ NGUYÊN VĂN nó. "
+    "Trả về VĂN BẢN THUẦN — TUYỆT ĐỐI KHÔNG markdown (không **in đậm**, không gạch đầu "
+    "dòng, không tiêu đề): câu được hiển thị/đọc NGUYÊN VĂN trên widget và điện thoại. "
+    "Trả về DUY NHẤT câu trả lời cho khách, không kèm giải thích."
 )
 
 
@@ -42,8 +48,8 @@ def build_prompt(state_key: str, session: Session, api_result: dict, lang: str) 
 
 
 # Câu chứa số/mã THẬT mà LLM có thể sửa/bịa (shop_phone, booking_code, giờ trống) -> LUÔN
-# dùng template code, KHÔNG qua LLM (§10: cấm LLM tự sinh số liệu; số trong nút do code tạo,
-# text phải khớp). Đa ngôn ngữ vẫn giữ vì template đã tách vi/en/ja.
+# dùng template code, KHÔNG qua LLM (§10: cấm LLM tự sinh số liệu). Đa ngôn ngữ vẫn giữ vì
+# template đã tách vi/en.
 # ADDON: khi đặt NHÓM, câu phải nêu ĐANG hỏi "Người n/m" (BR-10) — để LLM diễn đạt thì nó
 # hay bỏ mất chỉ số này, khiến người 2 nhìn giống hỏi lại người 1. Ép template tất định.
 # MODIFY: menu "đổi gì" — ép template tất định để chèn đồng hồ "sửa nhanh còn ~m:ss" (BR-17)
@@ -61,8 +67,19 @@ def generate(prompt: dict, llm: RealLLMClient | None) -> str:
             ensure_ascii=False,
         )
         text = llm.complete(_NLG_SYSTEM, user, temperature=0.4, max_tokens=400)
-        return text.strip() or templates.fake_sentence(prompt["key"], prompt["lang"], prompt["facts"])
-    except LLMError:
+        if text.strip():
+            return text.strip()
+        # LLM trả rỗng — khách vẫn thấy câu bình thường (câu mẫu) nên lỗi này dễ lọt qua
+        # nếu không log riêng ở đây (llm_client.py chỉ thấy "gọi thành công", không biết
+        # nội dung rỗng có phải là fallback hay không).
+        logger.warning("nlg: LLM trả rỗng cho key=%s -> dùng câu mẫu", prompt["key"])
+        return templates.fake_sentence(prompt["key"], prompt["lang"], prompt["facts"])
+    except LLMError as e:
+        # Khách vẫn nhận được câu trả lời bình thường (câu mẫu offline) nên /chat/message
+        # vẫn 200 — muốn biết lượt này đã fallback vì LLM lỗi thì PHẢI có dòng log này (lỗi
+        # kết nối/HTTP đã log ở app.llm_client, nhưng đó chỉ là log của lời gọi, không nói
+        # rõ hậu quả: câu trả lời thực tế khách nhận được có phải hàng thật hay không).
+        logger.warning("nlg: LLM lỗi (%s) cho key=%s -> dùng câu mẫu", e, prompt["key"])
         return templates.fake_sentence(prompt["key"], prompt["lang"], prompt["facts"])
 
 
@@ -76,22 +93,33 @@ def _facts_for(state_key: str, session: Session, api_result: dict) -> dict:
     facts: dict = {}
 
     # Đưa lựa chọn THẬT vào facts (LLM có dữ liệu chính xác, khỏi bịa placeholder/giá).
+    # Không còn nút bấm -> kèm luôn bản đã nối chuỗi (*_list) để câu mẫu offline đọc thẳng ra.
     if state_key == "SHOP":
-        facts["cua_hang"] = [sh.get("name") for sh in ar.get("shops", [])]
+        names = [sh.get("name") for sh in ar.get("shops", [])]
+        facts["cua_hang"] = names
+        facts["cua_hang_list"] = ", ".join(n for n in names if n)
+    elif state_key == "DATE":
+        facts["ngay_list"] = _date_list_line(ar.get("active_dates"), session.lang)
     elif state_key == "COURSE":
-        facts["course"] = [
+        courses = [
             f'{c.get("name")} · {c.get("duration_min")} phút · {c.get("price")}¥'
             for c in ar.get("courses", [])
         ]
+        facts["course"] = courses
+        facts["course_list"] = ", ".join(courses)
     elif state_key == "ADDON":
-        # Câu ĐỘNG: đã chọn add-on cho người này -> XÁC NHẬN + chỉ tới nút ✅; chưa chọn ->
-        # mời chọn. Tránh lặp câu y hệt sau mỗi lần chọn (khách tưởng bị treo, bấm toggle mãi).
+        # Đọc danh sách add-on cho ĐÚNG người đang hỏi (BR-10) — soạn tất định ở dưới.
         facts["addon_line"] = _addon_prompt_line(session, ar)
     elif state_key == "THERAPIST":
-        facts["nhan_vien"] = [
+        people = [
             f'{t.get("name")} ({"nữ" if t.get("gender") == "female" else "nam"})'
             for t in ar.get("therapists", [])
         ]
+        facts["nhan_vien"] = people
+        # Có người trực thì đọc tên ra; không có thì để rỗng (câu vẫn mời chọn theo giới tính).
+        facts["nhan_vien_list"] = (
+            f'Hôm đó có {", ".join(people)}. ' if people else ""
+        )
     elif state_key == "CONTACT":
         facts["hoi"] = _contact_ask(session)      # CHỈ những gì còn thiếu (phone/email)
 
@@ -119,9 +147,38 @@ _QUICK_EDIT = {
            " ⏱ Cửa sổ sửa nhanh 2 phút đã hết — sửa/hủy sẽ cần nhập lại email."),
     "en": (" ⏱ Quick edit/cancel (no email needed) for about {t} more.",
            " ⏱ The 2-minute quick-edit window has passed — editing now needs your email."),
-    "ja": (" ⏱ あと約{t}、メール不要で変更・キャンセルできます。",
-           " ⏱ 2分の即時変更枠は終了しました。変更にはメールの入力が必要です。"),
 }
+
+
+# Danh sách ngày cửa hàng còn làm — đọc ra để khách biết mà chọn.
+# Dài quá thì cắt bớt, khách vẫn nói được ngày khác và orchestrator hiểu ("31", "31/7"…).
+_DATE_LIST_LIMIT = 8
+_DATE_LIST_LINE = {
+    "vi": "Cửa hàng còn nhận các ngày: {d}.",
+    "en": "Available dates: {d}.",
+}
+
+
+def format_date_list(dates, limit: int = _DATE_LIST_LIMIT) -> str:
+    """'2026-07-31' -> '31/7' — đọc theo lối nói (bỏ số 0 thừa), nối bằng dấu phẩy."""
+    from datetime import date as _date
+
+    shown = []
+    for iso in (dates or [])[:limit]:
+        try:
+            d = _date.fromisoformat(iso)
+            shown.append(f"{d.day}/{d.month}")
+        except ValueError:
+            shown.append(iso)
+    return ", ".join(shown)
+
+
+def _date_list_line(active_dates, lang: str) -> str:
+    """Câu đọc các ngày còn mở. Chưa dò được (API lỗi) -> rỗng, câu chỉ hỏi chung chung."""
+    if not active_dates:
+        return ""
+    tmpl = _DATE_LIST_LINE.get(lang) or _DATE_LIST_LINE["vi"]
+    return tmpl.format(d=format_date_list(active_dates))
 
 
 def _quick_edit_note(session: Session) -> str:
@@ -137,29 +194,29 @@ def _quick_edit_note(session: Session) -> str:
 
 
 _ADDON_LINES = {
-    # (đã_chọn, chưa_chọn) — {p}=tiền tố "Người n/m: ", {n}=tên add-on đã chọn
-    "vi": ("{p}Đã chọn: {n}. Bấm nút ✅ bên dưới để sang bước tiếp, hoặc chọn thêm / bỏ chọn add-on.",
-           "{p}Anh/chị muốn thêm dịch vụ bổ sung nào không ạ? Chạm để chọn (được nhiều), hoặc bấm “Không thêm” để bỏ qua."),
-    "en": ("{p}Selected: {n}. Tap the ✅ button below to continue, or add/remove more.",
-           "{p}Any add-ons? Tap to select (you can pick several), or “No add-on” to skip."),
-    "ja": ("{p}選択中：{n}。下の✅ボタンで次へ進むか、追加・解除できます。",
-           "{p}追加オプションはいかがですか？タップで選択（複数可）、不要なら「追加なし」を押してください。"),
+    # {p}=tiền tố "Người n/m: ", {ds}=danh sách add-on đọc ra cho khách chọn
+    "vi": "{p}Anh/chị muốn thêm dịch vụ bổ sung nào không ạ? Hiện có: {ds}. "
+          "Anh/chị đọc tên dịch vụ muốn thêm, hoặc nói “không” để bỏ qua.",
+    "en": "{p}Would you like any add-ons? We have: {ds}. "
+          "Just name the ones you want, or say “no” to skip.",
 }
 
 
 def _addon_prompt_line(session: Session, api_result: dict) -> str:
-    """Câu hỏi add-on cho NGƯỜI hiện tại, có xác nhận lựa chọn (BR-10). Đây là câu tất định
-    (ADDON ở _LITERAL_SAFE_KEYS) nên soạn trọn ở đây, khỏi lệ thuộc LLM."""
+    """Câu hỏi add-on cho NGƯỜI hiện tại (BR-10). Đây là câu tất định (ADDON ở
+    _LITERAL_SAFE_KEYS) nên soạn trọn ở đây, khỏi lệ thuộc LLM.
+
+    Không còn nút -> phải ĐỌC danh sách add-on ra. Add-on bị cấm với course đang chọn
+    (BR-09) bị loại khỏi danh sách để không mời nhầm (A3 sớm)."""
     s = session.slots
     lang = session.lang if session.lang in _ADDON_LINES else "vi"
-    tong = s.party_size or 1
-    idx = min(s.addon_guest_idx, max(tong, 1) - 1)
-    sel_ids = s.guest_addons[idx] if idx < len(s.guest_addons) else []
-    id2name = {a.get("id"): a.get("name") for a in (api_result or {}).get("addons", [])}
-    names = ", ".join(id2name.get(i, "?") for i in sel_ids)
-    sel_t, empty_t = _ADDON_LINES[lang]
-    prefix = _addon_guest_prefix(session)
-    return sel_t.format(p=prefix, n=names) if sel_ids else empty_t.format(p=prefix)
+    offered = [
+        f'{a.get("name")} · {a.get("duration_min")} phút'
+        for a in (api_result or {}).get("addons", [])
+        if not (s.course_id and s.course_id in (a.get("restricted_course_ids") or []))
+    ]
+    return _ADDON_LINES[lang].format(p=_addon_guest_prefix(session),
+                                     ds=", ".join(offered))
 
 
 def _addon_guest_prefix(session: Session) -> str:
@@ -169,11 +226,8 @@ def _addon_guest_prefix(session: Session) -> str:
     if tong <= 1:
         return ""
     n = min(s.addon_guest_idx, tong - 1) + 1
-    lang = session.lang
-    if lang == "en":
+    if session.lang == "en":
         return f"Person {n}/{tong}: "
-    if lang == "ja":
-        return f"{n}/{tong}人目: "
     return f"Người {n}/{tong}: "
 
 
@@ -181,7 +235,6 @@ def _addon_guest_prefix(session: Session) -> str:
 _CONTACT_LABELS = {
     "vi": ("số điện thoại", "email", " và "),
     "en": ("phone number", "email", " and "),
-    "ja": ("電話番号", "メールアドレス", "と"),
 }
 
 

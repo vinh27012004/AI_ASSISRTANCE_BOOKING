@@ -1,7 +1,8 @@
 """Web layer — Flask. Endpoint đối ngoại DUY NHẤT: POST /chat/message (DD §2.1, Q3).
 
 Schema tối thiểu MVP, KHÔNG streaming: {conversation_id, text, lang} -> {conversation_id,
-reply_text, state, ui.buttons[], done}. Nâng lên SSE sau không phá schema (chỉ đổi content-type).
+reply_text, state, ui.buttons[] (luôn rỗng — giữ cho FE cũ), done}. Nâng lên SSE sau không
+phá schema (chỉ đổi content-type).
 """
 
 from __future__ import annotations

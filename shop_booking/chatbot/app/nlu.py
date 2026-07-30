@@ -19,18 +19,21 @@ from app.llm_client import LLMError, RealLLMClient
 logger = logging.getLogger(__name__)
 
 INTENTS = {"book", "modify", "cancel", "ask_info", "chitchat", "handoff"}
-_ENTITY_KEYS = ("date", "time", "party_size", "duration", "course", "addons", "therapist", "confirm")
+_ENTITY_KEYS = ("shop", "date", "time", "party_size", "duration", "course", "addons",
+                "therapist", "confirm")
 
 _NLU_SYSTEM = (
     "Bạn là bộ trích xuất tham số cho hệ thống đặt lịch massage. CHỈ trích xuất, TUYỆT ĐỐI "
     "KHÔNG trả lời khách. Trả về DUY NHẤT một JSON đúng schema:\n"
     '{"intent":"book|modify|cancel|ask_info|chitchat|handoff",'
-    '"entities":{"date":"YYYY-MM-DD|null","time":"HH:MM|null","party_size":"1|null",'
-    '"duration":"60|null","course":"text|null","addons":[],'
+    '"entities":{"shop":"text|null","date":"YYYY-MM-DD|null","time":"HH:MM|null",'
+    '"party_size":"1|null","duration":"60|null","course":"text|null","addons":[],'
     '"therapist":"name|male|female|none|null","confirm":"yes|no|null"}}\n'
     "QUAN TRỌNG: date PHẢI là ngày tuyệt đối YYYY-MM-DD. Khách nói tương đối (hôm nay/mai/"
     "ngày kia/thứ Hai tuần sau) thì tự quy đổi dựa trên 'Hôm nay' được cung cấp; time là 24h "
-    "HH:MM. Không thêm chữ nào ngoài JSON. Không suy diễn giá trị khách không nói (để null)."
+    "HH:MM. shop LÀ TÊN/ĐỊA ĐIỂM cửa hàng khách nêu (vd 'Sendai', 'Tokyo', 'chi nhánh Osaka') — "
+    "chỉ trích khi khách CHỈ RÕ cửa hàng, không suy diễn. Không thêm chữ nào ngoài JSON. "
+    "Không suy diễn giá trị khách không nói (để null)."
 )
 
 
@@ -105,24 +108,15 @@ def _normalize_entities(entities: dict) -> dict:
     return entities
 
 
-_REL_TODAY = {"today", "hôm nay", "hom nay", "nay", "今日", "本日", "きょう"}
-_REL_TOMORROW = {"tomorrow", "ngày mai", "ngay mai", "mai", "明日", "あした", "あす"}
-_REL_DAY_AFTER = {"day after tomorrow", "ngày kia", "ngay kia", "mốt", "mot", "明後日"}
-
-_CJK_RE = re.compile(r"[぀-ヿ一-鿿]")
+_REL_TODAY = {"today", "hôm nay", "hom nay", "nay"}
+_REL_TOMORROW = {"tomorrow", "ngày mai", "ngay mai", "mai"}
+_REL_DAY_AFTER = {"day after tomorrow", "ngày kia", "ngay kia", "mốt", "mot"}
 
 
 def _match_rel(low: str, words: set[str]) -> bool:
-    """Khớp từ chỉ ngày tương đối. Từ Latin/Việt cần RANH GIỚI TỪ (\\b) để 'mai' không dính
-    trong 'email', 'nay' không dính trong 'ngày'…; từ Nhật (CJK không có ranh giới) dùng
-    chuỗi con."""
-    for w in words:
-        if _CJK_RE.search(w):
-            if w in low:
-                return True
-        elif re.search(rf"\b{re.escape(w)}\b", low):
-            return True
-    return False
+    """Khớp từ chỉ ngày tương đối. Cần RANH GIỚI TỪ (\\b) để 'mai' không dính trong 'email',
+    'nay' không dính trong 'ngày'…"""
+    return any(re.search(rf"\b{re.escape(w)}\b", low) for w in words)
 
 
 def _to_iso_date(value: str) -> str | None:
@@ -166,15 +160,10 @@ def parse_date_freeform(text: str, *, allow_bare_day: bool = False,
             return (today + timedelta(days=delta)).isoformat()
 
     day = month = None
-    m = re.search(r"(?:(\d{1,2})\s*月\s*)?(\d{1,2})\s*日", low)      # (M月)?D日
+    m = re.search(r"\b(?:ngày|ngay|day)\s*0*(\d{1,2})"              # ngày D [tháng M] / day D
+                  r"(?:\s*(?:tháng|thang|month|[/.\-])\s*0*(\d{1,2}))?", low)
     if m:
-        month = int(m[1]) if m[1] else None
-        day = int(m[2])
-    if day is None:                                                 # ngày D [tháng M] / day D
-        m = re.search(r"\b(?:ngày|ngay|day)\s*0*(\d{1,2})"
-                      r"(?:\s*(?:tháng|thang|month|[/.\-])\s*0*(\d{1,2}))?", low)
-        if m:
-            day, month = int(m[1]), (int(m[2]) if m[2] else None)
+        day, month = int(m[1]), (int(m[2]) if m[2] else None)
     if day is None:                                                 # D tháng M
         m = re.search(r"\b0*(\d{1,2})\s*(?:tháng|thang)\s*0*(\d{1,2})\b", low)
         if m:
@@ -236,8 +225,73 @@ _PLACEHOLDER_STRIP = re.compile(r"\{\{[^}]+\}\}")
 _LONGNUM_STRIP = re.compile(r"\d[\d\-.\s]{5,}\d")
 
 
+# Khách CHỌN ngôn ngữ bằng lời — cần cho kênh gọi điện (không gõ/bấm gì được). Chỉ khớp
+# khi CẢ câu là tên ngôn ngữ, để "english massage" không bị hiểu nhầm thành chọn tiếng Anh.
+_LANG_CHOICE = {
+    "vi": {"tiếng việt", "tieng viet", "vietnamese"},
+    "en": {"english", "tiếng anh", "tieng anh"},
+}
+
+
+def detect_lang_choice(text: str) -> str | None:
+    """'Tiếng Việt'/'English' -> mã lang; câu khác -> None."""
+    low = (text or "").strip().lower().strip(".!? ")
+    for lang, phrases in _LANG_CHOICE.items():
+        if low in phrases:
+            return lang
+    return None
+
+
+# Khách từ chối / bỏ qua bước hiện tại ("không thêm gì", "thôi", "no thanks"). Dùng ở
+# bước ADDON để sang người kế, và ở THERAPIST để bỏ chỉ định.
+_NEGATIVE_WORDS = ("không", "khong", "thôi", "thoi", "bỏ qua", "bo qua", "miễn", "mien",
+                   "no thanks", "no thank", "nothing", "none", "no add", "skip", "nope")
+_NEGATIVE_EXACT = {"không", "khong", "no", "ko", "k", "thôi", "thoi", "nope", "none", "skip"}
+
+
+def is_negative(text: str) -> bool:
+    """Câu mang ý 'không / bỏ qua'. Bắt cả câu ngắn trần ('không', 'no') lẫn cụm trong câu.
+
+    'no' KHÔNG nằm trong _NEGATIVE_WORDS (chỉ khớp nguyên câu) vì nó là chuỗi con của quá
+    nhiều từ ('nothing', 'không' viết liền…) — bắt rộng ở đây sẽ nuốt nhầm câu chọn add-on."""
+    low = (text or "").strip().lower().strip(".!? ")
+    if low in _NEGATIVE_EXACT:
+        return True
+    return any(w in low for w in _NEGATIVE_WORDS)
+
+
+# Khách nói muốn đổi phần nào của lịch đã đặt (UC-02) — thay cho menu nút "đổi gì" cũ.
+_MODIFY_TARGETS = (
+    ("keep",   ("giữ nguyên", "giu nguyen", "thôi không đổi", "thoi khong doi", "keep",
+                "leave it", "nothing")),
+    ("slot",   ("giờ", "gio", "thời gian", "thoi gian", "time", "hour", "schedule")),
+    ("party",  ("số người", "so nguoi", "mấy người", "may nguoi", "party", "people",
+                "guest", "person")),
+    ("course", ("dịch vụ", "dich vu", "gói", "goi", "course", "service", "package")),
+)
+
+
+def is_cancel_request(text: str) -> bool:
+    """Câu đòi HỦY lịch. Xét trước detect_modify_target vì 'hủy lịch' cũng là một lựa chọn
+    trong menu 'đổi gì' — không tách ra thì bị hiểu thành đổi nhầm mục."""
+    low = (text or "").strip().lower()
+    return any(w in low for w in _CANCEL_WORDS)
+
+
+def detect_modify_target(text: str) -> str | None:
+    """'đổi giờ' -> 'slot'; 'đổi số người' -> 'party'; 'đổi dịch vụ' -> 'course';
+    'giữ nguyên' -> 'keep'. Không rõ -> None (bot hỏi lại).
+
+    'keep' xét TRƯỚC để 'thôi không đổi giờ nữa' không bị bắt thành 'slot'."""
+    low = (text or "").strip().lower()
+    for target, words in _MODIFY_TARGETS:
+        if any(w in low for w in words):
+            return target
+    return None
+
+
 def detect_lang(text: str) -> str | None:
-    """Nhận diện ngôn ngữ từ tin nhắn (§7). Nhật > Việt (dấu) > Anh. None -> giữ nguyên
+    """Nhận diện ngôn ngữ từ tin nhắn (§7). Việt (có dấu) > Anh. None -> giữ nguyên
     ngôn ngữ đang dùng.
 
     BỎ email /   SĐT / mã / placeholder trước khi đoán: chữ Latin trong email hay mã KHÔNG phải
@@ -246,9 +300,10 @@ def detect_lang(text: str) -> str | None:
     cleaned = _EMAIL_STRIP.sub(" ", text)
     cleaned = _PLACEHOLDER_STRIP.sub(" ", cleaned)
     cleaned = _LONGNUM_STRIP.sub(" ", cleaned)
-    if re.search(r"[぀-ヿ一-鿿]", cleaned):   # kana + kanji
-        return "ja"
-    if re.search(r"[ăâđêôơưàáạảãèéẹẻẽìíịỉĩòóọỏõùúụủũỳýỵỷỹ]", cleaned, re.IGNORECASE):
+    # Ạ-ỹ (Latin Extended Additional) phủ TOÀN BỘ nguyên âm dấu tổ hợp (ế ệ ố ộ
+    # ớ ợ ứ ự ắ ặ ấ ậ...) — liệt kê tay trước đây sót nhóm này nên "Tiếng Việt" (có ế/ệ)
+    # không khớp ký tự Việt nào, rơi xuống nhánh [a-zA-Z] và bị đoán thành "en".
+    if re.search(r"[ăâđêôơưàáãèéìíòóõùúýĩũẠ-ỹ]", cleaned, re.IGNORECASE):
         return "vi"
     if re.search(r"[a-zA-Z]", cleaned):
         return "en"
@@ -272,12 +327,12 @@ def _parse_json(raw: str):
 
 
 _HANDOFF_WORDS = ("nhân viên", "người thật", "gặp người", "gọi cửa hàng", "tổng đài",
-                  "agent", "human", "staff", "スタッフ", "オペレーター")
-_CANCEL_WORDS = ("hủy", "huỷ", "cancel", "キャンセル")
-_MODIFY_WORDS = ("sửa", "đổi lịch", "thay đổi", "reschedule", "変更")
+                  "agent", "human", "staff")
+_CANCEL_WORDS = ("hủy", "huỷ", "cancel")
+_MODIFY_WORDS = ("sửa", "đổi lịch", "thay đổi", "reschedule")
 _YES_WORDS = ("đồng ý", "xác nhận", "đúng rồi", "chốt", "vâng", "ok", "oke", "yes",
-              "correct", "confirm", "はい", "確認")
-_NO_WORDS = ("không phải", "sai rồi", "chưa đúng", "no", "not", "いいえ")
+              "correct", "confirm")
+_NO_WORDS = ("không phải", "sai rồi", "chưa đúng", "no", "not")
 
 
 def _rule_based(text: str) -> dict:
@@ -294,12 +349,12 @@ def _rule_based(text: str) -> dict:
     entities = {k: None for k in _ENTITY_KEYS}
     entities["addons"] = []
 
-    # date — ISO/tương đối/'d/m'/'ngày D tháng M'/'D日'. KHÔNG lấy số trần ở đây (NLU
-    # không biết bước hiện tại; số trần diễn giải theo ngữ cảnh ở orchestrator bước DATE).
+    # date — ISO/tương đối/'d/m'/'ngày D tháng M'. KHÔNG lấy số trần ở đây (NLU không biết
+    # bước hiện tại; số trần diễn giải theo ngữ cảnh ở orchestrator bước DATE).
     entities["date"] = parse_date_freeform(low, allow_bare_day=False)
 
     # time: "8:00", "8h", "8 giờ", "14:30"
-    m = re.search(r"\b(\d{1,2})(?::|h|時|\s*giờ)(\d{2})?\b", low)
+    m = re.search(r"\b(\d{1,2})(?::|h|\s*giờ)(\d{2})?\b", low)
     if m:
         hh = int(m.group(1))
         mm = int(m.group(2)) if m.group(2) else 0
@@ -307,21 +362,21 @@ def _rule_based(text: str) -> dict:
             entities["time"] = f"{hh:02d}:{mm:02d}"
 
     # party_size
-    m = re.search(r"\b(\d+)\s*(?:người|ng|people|person|名|人)\b", low)
+    m = re.search(r"\b(\d+)\s*(?:người|ng|people|person)\b", low)
     if m:
         entities["party_size"] = int(m.group(1))
 
     # duration
-    m = re.search(r"\b(\d+)\s*(?:phút|phut|min|minutes|分)\b", low)
+    m = re.search(r"\b(\d+)\s*(?:phút|phut|min|minutes)\b", low)
     if m:
         entities["duration"] = int(m.group(1))
 
     # therapist
-    if re.search(r"\b(nữ|nu|female|女性)\b", low):
+    if re.search(r"\b(nữ|nu|female)\b", low):
         entities["therapist"] = "female"
-    elif re.search(r"\b(nam|male|男性)\b", low):
+    elif re.search(r"\b(nam|male)\b", low):
         entities["therapist"] = "male"
-    elif re.search(r"(không chỉ định|ai cũng được|bất kỳ|skip|no preference|誰でも)", low):
+    elif re.search(r"(không chỉ định|ai cũng được|bất kỳ|skip|no preference)", low):
         entities["therapist"] = "none"
 
     # confirm

@@ -37,8 +37,10 @@ class Slots:
     contact_verified: bool = False        # đã qua POST /customers/lookup (chặn NG — BR-06)
     confirm: Optional[str] = None         # "yes" | "no" | None
     # gợi ý tự do (chưa map id)
+    shop_text: Optional[str] = None
     course_text: Optional[str] = None
     therapist_text: Optional[str] = None
+    addon_texts: list[str] = field(default_factory=list)  # tên add-on khách nói, chờ map id
     party_over: bool = False              # khách nói >3 người -> nhánh handoff (BR-14)
 
     def ensure_guest_addons(self) -> None:
