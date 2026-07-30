@@ -38,6 +38,9 @@ class Settings:
     # đông A8): mọi ca "liên hệ" gom về một đầu mối thay vì số riêng từng cửa hàng. Rỗng ->
     # dùng số cửa hàng như cũ. Có default nên constructor cũ (test) không cần truyền.
     support_phone: str = ""
+    # Mức log ('DEBUG'/'INFO'/'WARNING'...) — xem app/shop_api_client.py: mọi lời gọi
+    # shop_api được log ở đây để soi dữ liệu sai (BE trả sai hay chatbot xử lý sai).
+    log_level: str = "INFO"
 
     @property
     def use_real_llm(self) -> bool:
@@ -62,4 +65,5 @@ def load_settings() -> Settings:
         fallback_shop_phone=os.environ.get("FALLBACK_SHOP_PHONE", ""),
         # SUPPORT_PHONE riêng; chưa đặt thì lấy FALLBACK_SHOP_PHONE (số env sẵn có).
         support_phone=os.environ.get("SUPPORT_PHONE", os.environ.get("FALLBACK_SHOP_PHONE", "")),
+        log_level=os.environ.get("LOG_LEVEL", "INFO"),
     )

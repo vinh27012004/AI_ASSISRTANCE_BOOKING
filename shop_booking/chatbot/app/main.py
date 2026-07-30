@@ -6,6 +6,8 @@ reply_text, state, ui.buttons[], done}. Nâng lên SSE sau không phá schema (c
 
 from __future__ import annotations
 
+import logging
+import os
 from dataclasses import asdict
 
 from flask import Flask, jsonify, request
@@ -16,10 +18,27 @@ from app.orchestrator import Orchestrator
 from app.session import build_store
 from app.shop_api_client import ShopApiClient
 
+_CHATBOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_LOG_FILE = os.path.join(_CHATBOT_DIR, "logs", "chatbot.log")
+
+
+def _configure_logging(level: str) -> None:
+    """Log request/response gọi shop_api (app/shop_api_client.py) ra CẢ console lẫn file,
+    để xem lại được khi debug dữ liệu sai. force=True để thắng handler mặc định Flask/Werkzeug
+    có thể đã gắn sẵn trước khi hàm này chạy."""
+    os.makedirs(os.path.dirname(_LOG_FILE), exist_ok=True)
+    logging.basicConfig(
+        level=getattr(logging, level.upper(), logging.INFO),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        handlers=[logging.StreamHandler(), logging.FileHandler(_LOG_FILE, encoding="utf-8")],
+        force=True,
+    )
+
 
 def create_app() -> Flask:
     app = Flask(__name__)
     settings = load_settings()
+    _configure_logging(settings.log_level)
 
     store = build_store(settings.redis_url, settings.session_ttl_seconds)
     api = ShopApiClient(settings.shop_api_base_url)

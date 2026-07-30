@@ -10,10 +10,13 @@ Không cấu hình router (llm=None) -> nhánh rule-based offline: đủ cho dev
 from __future__ import annotations
 
 import json
+import logging
 import re
 from datetime import date, timedelta
 
 from app.llm_client import LLMError, RealLLMClient
+
+logger = logging.getLogger(__name__)
 
 INTENTS = {"book", "modify", "cancel", "ask_info", "chitchat", "handoff"}
 _ENTITY_KEYS = ("date", "time", "party_size", "duration", "course", "addons", "therapist", "confirm")
@@ -39,6 +42,7 @@ def extract(masked_text: str, lang: str, llm: RealLLMClient | None) -> dict | No
     """Trả {'intent', 'entities'} đã validate, hoặc None nếu không trích được (hỏi lại)."""
     if llm is None:
         parsed = _rule_based(masked_text)
+        source = "rule_based (chưa cấu hình LLM)"
     else:
         parsed = None
         try:
@@ -51,15 +55,20 @@ def extract(masked_text: str, lang: str, llm: RealLLMClient | None) -> dict | No
             parsed = validate_schema(_parse_json(raw))
         except LLMError:
             parsed = None
+        source = "llm"
         # Router LỖI *hoặc* trả JSON sai/không parse được (router hay "nói" thay vì trích) ->
         # thử rule-based rồi mới bó tay. Trước đây chỉ fallback khi LLMError, nên câu rõ như
         # "đồng ý đặt" mà router trả text thường -> None -> REPROMPT oan (bot "suy nghĩ sai").
         if parsed is None:
             parsed = _rule_based(masked_text)
+            source = "rule_based (LLM lỗi hoặc JSON sai schema)"
 
     if parsed is None:
+        logger.warning("nlu: không trích được gì từ %r (lang=%s) -> hỏi lại", masked_text, lang)
         return None
     parsed["entities"] = _normalize_entities(parsed["entities"])  # date tương đối -> ISO
+    logger.info("nlu: text=%r lang=%s source=%s -> intent=%s entities=%s",
+                masked_text, lang, source, parsed["intent"], parsed["entities"])
     return parsed
 
 

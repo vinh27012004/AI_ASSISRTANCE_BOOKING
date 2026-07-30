@@ -793,6 +793,30 @@ def test_quick_edit_note_live_and_expired():
     check(nlg._quick_edit_note(ses) == "", "chưa có mốc -> không hiện gì")
 
 
+def test_buttons_localized_by_lang():
+    """Nhãn nút tĩnh đổi theo ngôn ngữ; value (token) GIỮ NGUYÊN để logic không đổi."""
+    from app.buttons import buttons_for
+    from app.session import Session as Ses, Slots as Sl
+
+    b_en = buttons_for(S.CONFIRM, Ses(conversation_id="c", lang="en"), {})
+    check({x["label"] for x in b_en} == {"Confirm booking", "Edit"}, "CONFIRM en -> nhãn tiếng Anh")
+    check({x["value"] for x in b_en} == {"confirm:yes", "confirm:no"}, "value giữ nguyên bất kể ngôn ngữ")
+
+    b_ja = buttons_for(S.THERAPIST, Ses(conversation_id="c", lang="ja"), {"therapists": []})
+    check(any(x["label"] == "おまかせ" and x["value"] == "therapist:skip" for x in b_ja),
+          "THERAPIST ja -> 'おまかせ' (value therapist:skip)")
+
+    b_mod = buttons_for(S.MODIFY, Ses(conversation_id="c", lang="en"), {})
+    check(any(x["label"] == "Change time" and x["value"] == "modify:slot" for x in b_mod),
+          "MODIFY en -> 'Change time'")
+
+    ses = Ses(conversation_id="c", lang="en",
+              slots=Sl(party_size=2, course_id=3, guest_addons=[[7], []], addon_guest_idx=0))
+    ar = {"addons": [{"id": 7, "name": "Aroma", "duration_min": 30, "price": 1, "restricted_course_ids": []}]}
+    done = [x for x in buttons_for(S.ADDON, ses, ar) if x["value"] == "addon:done"][0]
+    check("Done" in done["label"] and "guest 1" in done["label"], "ADDON en nhóm -> '✅ Done (guest 1) →'")
+
+
 def run_all():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for t in tests:

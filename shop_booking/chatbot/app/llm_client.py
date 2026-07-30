@@ -9,10 +9,14 @@ chúng, nên service chạy/test được không cần LLM (mẹo test §9)."""
 from __future__ import annotations
 
 import json
+import logging
 import urllib.error
 import urllib.request
+import uuid
 
 from app.config import Settings
+
+logger = logging.getLogger(__name__)
 
 
 class LLMError(Exception):
@@ -30,6 +34,9 @@ class RealLLMClient:
 
     def complete(self, system: str, user: str, *, temperature: float = 0.2,
                  max_tokens: int = 512, response_json: bool = False) -> str:
+        # call_id nối dòng request <-> response cùng 1 lời gọi trong log (giống
+        # ShopApiClient._request) — nhiều hội thoại chạy đồng thời thì log các lượt xen kẽ nhau.
+        call_id = uuid.uuid4().hex[:8]
         payload = {
             "model": self.model,
             "messages": [
@@ -46,6 +53,11 @@ class RealLLMClient:
             # Router nào không hỗ trợ sẽ bỏ qua field này — vẫn parse JSON ở nlu.py.
             payload["response_format"] = {"type": "json_object"}
 
+        # system/user đã được mask PII từ trước khi tới đây (app/pii.py) nên log nguyên văn
+        # an toàn. KHÔNG log api_key/header Authorization — đó là secret gọi router.
+        logger.info("llm -> [%s] model=%s temperature=%s max_tokens=%s system=%s user=%s",
+                    call_id, self.model, temperature, max_tokens, system, user)
+
         req = urllib.request.Request(
             f"{self.base_url}/chat/completions",
             data=json.dumps(payload).encode("utf-8"),
@@ -61,11 +73,24 @@ class RealLLMClient:
                 raw = resp.read().decode("utf-8")
         except urllib.error.HTTPError as e:
             detail = e.read().decode("utf-8", "replace")[:300]
+            logger.warning("llm <- [%s] HTTP %s: %s", call_id, e.code, detail)
             raise LLMError(f"HTTP {e.code}: {detail}") from e
-        except (urllib.error.URLError, TimeoutError) as e:
+        except OSError as e:
+            # OSError bao trùm cả URLError/TimeoutError (đều kế thừa OSError) LẪN các lỗi
+            # socket urllib KHÔNG bọc thành URLError (vd ConnectionResetError khi bị ngắt
+            # kết nối giữa lúc đọc response ở http.client.getresponse() — urllib chỉ bọc
+            # OSError thành URLError lúc GỬI request, không bọc lúc ĐỌC response) — nếu chỉ
+            # bắt (URLError, TimeoutError) thì ConnectionResetError lọt qua thành lỗi 500
+            # không rõ nguyên nhân ở /chat/message.
+            logger.error("llm <- [%s] lỗi kết nối: %s", call_id, e)
             raise LLMError(str(e)) from e
 
-        return _extract_content(raw)
+        logger.info("llm <- [%s] raw=%s", call_id, raw)
+        try:
+            return _extract_content(raw)
+        except LLMError as e:
+            logger.warning("llm <- [%s] parse lỗi: %s raw[:200]=%r", call_id, e, raw[:200])
+            raise
 
 
 def _extract_content(raw: str) -> str:

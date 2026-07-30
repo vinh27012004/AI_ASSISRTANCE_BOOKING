@@ -9,10 +9,14 @@ thẳng openapi.
 from __future__ import annotations
 
 import json
+import logging
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from typing import Any, Optional
+
+logger = logging.getLogger(__name__)
 
 
 class ShopApiError(Exception):
@@ -34,6 +38,9 @@ class ShopApiClient:
     # --- HTTP core ---
     def _request(self, method: str, path: str, *, params: dict | None = None,
                  body: dict | None = None, extra_headers: dict | None = None) -> Any:
+        # call_id nối dòng request <-> response cùng 1 lời gọi trong log, kể cả khi nhiều
+        # hội thoại chạy đồng thời khiến log của các lượt chat xen kẽ nhau.
+        call_id = uuid.uuid4().hex[:8]
         url = f"{self.base_url}{path}"
         if params:
             clean = {k: v for k, v in params.items() if v is not None and v != ""}
@@ -49,14 +56,24 @@ class ShopApiClient:
             data = json.dumps(body, ensure_ascii=False).encode("utf-8")
             headers["Content-Type"] = "application/json"
 
+        logger.info("shop_api -> [%s] %s %s params=%s body=%s",
+                    call_id, method, path, params, body)
+
         req = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 raw = resp.read().decode("utf-8")
-                return json.loads(raw) if raw else {}
+                parsed = json.loads(raw) if raw else {}
+                logger.info("shop_api <- [%s] %s %s status=%s body=%s",
+                            call_id, method, path, resp.status, parsed)
+                return parsed
         except urllib.error.HTTPError as e:
-            raise self._to_api_error(e)
+            err = self._to_api_error(e)
+            logger.warning("shop_api <- [%s] %s %s status=%s code=%s message=%s details=%s",
+                           call_id, method, path, err.status, err.code, err.message, err.details)
+            raise err
         except (urllib.error.URLError, TimeoutError) as e:
+            logger.error("shop_api <- [%s] %s %s lỗi kết nối: %s", call_id, method, path, e)
             raise ShopApiError(503, "INTERNAL_ERROR", f"Không gọi được shop_api: {e}")
 
     @staticmethod
