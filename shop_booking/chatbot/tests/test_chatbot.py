@@ -439,6 +439,48 @@ def test_detect_lang_ignores_pii():
     check(nlu.detect_lang("I want to book a massage") == "en", "câu tiếng Anh thật -> en")
 
 
+def test_detect_lang_no_false_english():
+    """Không được đoán bừa 'en' chỉ vì có chữ Latin: '16h30' (chữ h) và tiếng Việt KHÔNG DẤU
+    từng làm bot lật sang tiếng Anh giữa chừng."""
+    from app import nlu
+    check(nlu.detect_lang("16h30") is None, "'16h30' -> không đủ căn cứ, giữ nguyên ngôn ngữ")
+    check(nlu.detect_lang("8h") is None, "'8h' -> không phải tiếng Anh")
+    check(nlu.detect_lang("ok") is None, "'ok' dùng chung hai tiếng -> không đổi")
+    check(nlu.detect_lang("Foot") is None, "tên add-on -> không phải tín hiệu ngôn ngữ")
+    check(nlu.detect_lang("toi muon dat lich ngay mai") == "vi",
+          "tiếng Việt KHÔNG DẤU vẫn nhận đúng là vi")
+
+
+def test_lang_locked_after_first_detection():
+    """Nhận ra ngôn ngữ 1 lần rồi thì CHỐT cả phiên — không lật lại giữa chừng."""
+    api = StubApi()
+    orch = _orch(api)
+    orch.handle_turn("clk", "")
+    orch.handle_turn("clk", "Shop A")
+    orch.handle_turn("clk", "toi muon dat ngay mai")     # tiếng Việt không dấu -> vi + chốt
+    ses = orch.store.load("clk")
+    check(ses.lang == "vi" and ses.lang_locked is True, "nhận ra vi -> chốt cho cả phiên")
+    orch.handle_turn("clk", "2 people please")           # câu tiếng Anh sau đó KHÔNG lật nữa
+    check(orch.store.load("clk").lang == "vi", "đã chốt -> không tự đổi ngôn ngữ giữa chừng")
+
+
+def test_force_lang_env_pins_language():
+    """FORCE_LANG ép cứng: tự đoán lẫn yêu cầu đổi tường minh của khách đều không đổi được."""
+    api = StubApi()
+    settings = Settings(
+        shop_api_base_url="http://x/api/v1", llm_base_url="", llm_api_key="", llm_model="m",
+        redis_url="", session_ttl_seconds=1800, vault_enc_key="", fallback_shop_phone="",
+        force_lang="vi",
+    )
+    orch = Orchestrator(InMemorySessionStore(), api, None, settings)
+    orch.handle_turn("cfl", "")
+    orch.handle_turn("cfl", "I want to book a massage")   # câu tiếng Anh thật
+    check(orch.store.load("cfl").lang == "vi", "FORCE_LANG -> không tự đoán sang en")
+    r = orch.handle_turn("cfl", "English")                # yêu cầu đổi tường minh
+    check(orch.store.load("cfl").lang == "vi", "FORCE_LANG -> kể cả xin đổi cũng giữ nguyên")
+    check("Anh/chị" in r.reply_text, "câu trả lời vẫn bằng tiếng Việt")
+
+
 def test_contact_asks_only_missing():
     """Đã cho số điện thoại -> chỉ hỏi email, không hỏi lại cả hai."""
     from app import nlg

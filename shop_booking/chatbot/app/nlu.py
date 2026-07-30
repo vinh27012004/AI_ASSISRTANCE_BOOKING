@@ -290,13 +290,34 @@ def detect_modify_target(text: str) -> str | None:
     return None
 
 
-def detect_lang(text: str) -> str | None:
-    """Nhận diện ngôn ngữ từ tin nhắn (§7). Việt (có dấu) > Anh. None -> giữ nguyên
-    ngôn ngữ đang dùng.
+# Từ khóa nhận diện ngôn ngữ khi câu KHÔNG có dấu tiếng Việt. Cố ý không đưa vào đây các
+# từ trùng với DỮ LIỆU của mình (tên cửa hàng/course/add-on như "shop", "foot", "oil") —
+# đó là lựa chọn khách đọc lại, không phải tín hiệu ngôn ngữ.
+_VI_WORDS = {
+    "toi", "minh", "muon", "can", "dat", "lich", "hen", "ngay", "gio", "phut", "nguoi",
+    "khong", "duoc", "giup", "gium", "nhe", "a", "cua", "hang", "may", "bao", "nhieu",
+    "roi", "chua", "luc", "vao", "cho", "voi", "va", "hay", "the", "nao", "sang", "chieu",
+    "toi_nay", "mai", "mot", "hai", "ba", "bon", "sau", "bay", "tam", "chin", "muoi",
+}
+_EN_WORDS = {
+    "i", "you", "we", "my", "me", "want", "would", "like", "need", "please", "book",
+    "booking", "can", "could", "and", "for", "at", "with", "is", "are", "do", "does",
+    "hello", "hi", "thanks", "thank", "yes", "no", "tomorrow", "today", "people",
+    "person", "morning", "afternoon", "evening", "available", "change", "cancel",
+}
+_WORD_RE = re.compile(r"[a-z]+")
 
-    BỎ email /   SĐT / mã / placeholder trước khi đoán: chữ Latin trong email hay mã KHÔNG phải
-    tín hiệu tiếng Anh — trước đây khách gõ 'sđt + email' làm bot nhảy sang tiếng Anh (kể cả
-    câu chặn NG)."""
+
+def detect_lang(text: str) -> str | None:
+    """Nhận diện ngôn ngữ từ tin nhắn (§7). None -> GIỮ NGUYÊN ngôn ngữ đang dùng.
+
+    BỎ email/SĐT/mã/placeholder trước khi đoán: chữ Latin trong email hay mã KHÔNG phải
+    tín hiệu tiếng Anh.
+
+    KHÔNG dùng luật cũ "có chữ Latin = tiếng Anh": tiếng Việt gõ KHÔNG DẤU
+    ("toi muon dat lich") và cả giờ giấc ("16h30" — chữ 'h') đều toàn chữ Latin, nên luật
+    đó làm bot lật sang tiếng Anh giữa chừng hội thoại. Nay phải có TỪ đặc trưng mới đổi;
+    không đủ căn cứ thì trả None để giữ nguyên."""
     cleaned = _EMAIL_STRIP.sub(" ", text)
     cleaned = _PLACEHOLDER_STRIP.sub(" ", cleaned)
     cleaned = _LONGNUM_STRIP.sub(" ", cleaned)
@@ -305,7 +326,12 @@ def detect_lang(text: str) -> str | None:
     # không khớp ký tự Việt nào, rơi xuống nhánh [a-zA-Z] và bị đoán thành "en".
     if re.search(r"[ăâđêôơưàáãèéìíòóõùúýĩũẠ-ỹ]", cleaned, re.IGNORECASE):
         return "vi"
-    if re.search(r"[a-zA-Z]", cleaned):
+
+    words = set(_WORD_RE.findall(cleaned.lower()))
+    vi_hits, en_hits = len(words & _VI_WORDS), len(words & _EN_WORDS)
+    if vi_hits > en_hits:
+        return "vi"
+    if en_hits > vi_hits:
         return "en"
     return None
 

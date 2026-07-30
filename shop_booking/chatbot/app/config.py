@@ -41,6 +41,10 @@ class Settings:
     # Mức log ('DEBUG'/'INFO'/'WARNING'...) — xem app/shop_api_client.py: mọi lời gọi
     # shop_api được log ở đây để soi dữ liệu sai (BE trả sai hay chatbot xử lý sai).
     log_level: str = "INFO"
+    # ÉP CỨNG ngôn ngữ cho mọi phiên ('vi'/'en'). Bỏ trống -> tự nhận theo câu khách nói
+    # (chốt sau lần nhận đầu tiên). Đặt khi triển khai cho thị trường một ngôn ngữ, muốn
+    # bot TUYỆT ĐỐI không đổi tiếng giữa chừng.
+    force_lang: str = ""
 
     @property
     def use_real_llm(self) -> bool:
@@ -66,4 +70,5 @@ def load_settings() -> Settings:
         # SUPPORT_PHONE riêng; chưa đặt thì lấy FALLBACK_SHOP_PHONE (số env sẵn có).
         support_phone=os.environ.get("SUPPORT_PHONE", os.environ.get("FALLBACK_SHOP_PHONE", "")),
         log_level=os.environ.get("LOG_LEVEL", "INFO"),
+        force_lang=os.environ.get("FORCE_LANG", "").strip().lower(),
     )

@@ -63,6 +63,9 @@ class Orchestrator:
         session.turn_count += 1
         if lang_hint:
             session.lang = lang_hint
+        if self.settings.force_lang:          # FORCE_LANG: chốt cứng, bỏ mọi cơ chế tự đoán
+            session.lang = self.settings.force_lang
+            session.lang_locked = True
 
         # Mở chat (text rỗng) -> câu chào.
         if not (user_text or "").strip():
@@ -80,7 +83,9 @@ class Orchestrator:
 
         # Khách CHỌN ngôn ngữ bằng LỜI ("Tiếng Việt"/"English"). Bỏ qua NLU: cả câu chỉ là
         # tên ngôn ngữ, không có tham số gì để trích (khỏi tốn một lượt gọi LLM vô ích).
-        if (lang_choice := nlu.detect_lang_choice(user_text)) is not None:
+        # FORCE_LANG bật thì kể cả yêu cầu tường minh cũng không đổi (đúng nghĩa "cố định").
+        if not self.settings.force_lang and \
+                (lang_choice := nlu.detect_lang_choice(user_text)) is not None:
             session.lang = lang_choice
             session.lang_locked = True
         # Đang ở menu "đổi gì" (UC-02): câu này là chọn phần muốn đổi, không phải câu đặt mới.
@@ -105,7 +110,11 @@ class Orchestrator:
             if not session.lang_locked and asked not in _LANG_NEUTRAL_STATES:
                 lang = nlu.detect_lang(user_text)
                 if lang:
+                    # CHỐT luôn cho cả phiên: đoán đi đoán lại mỗi lượt là nguồn gốc việc bot
+                    # đang nói tiếng Việt bỗng nhảy sang tiếng Anh giữa chừng. Khách muốn đổi
+                    # thì nói thẳng "English"/"Tiếng Việt" (detect_lang_choice ở trên).
                     session.lang = lang
+                    session.lang_locked = True
             if parsed["intent"] == "handoff":
                 return self._handoff(session)
 
