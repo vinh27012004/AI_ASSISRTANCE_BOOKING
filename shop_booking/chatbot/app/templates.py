@@ -1,8 +1,8 @@
-"""Template NLG theo state × ngôn ngữ — DD §3.1, §7.
+"""Template NLG theo state — DD §3.1, §7. Chatbot chỉ phục vụ TIẾNG VIỆT (giai đoạn này).
 
 - INSTRUCTION[state]: chỉ dẫn (đưa cho LLM ở bước ⑥) — nói Ý câu cần sinh, KHÔNG chứa số
-  liệu (số liệu nằm ở `facts`). LLM diễn đạt theo `lang`, cấm bịa (§10).
-- FAKE[state][lang]: câu mẫu offline khi chưa cấu hình router. Thiếu ngôn ngữ -> fallback 'vi'.
+  liệu (số liệu nằm ở `facts`). LLM diễn đạt tự nhiên, cấm bịa (§10).
+- FAKE[state]: câu mẫu offline khi chưa cấu hình router.
 
 KHÔNG còn nút bấm: mọi lựa chọn (cửa hàng/ngày/course/add-on/giờ) phải được ĐỌC RA trong
 câu, vì khách chỉ có thể trả lời bằng lời (chat gõ tay hoặc gọi điện).
@@ -10,7 +10,7 @@ câu, vì khách chỉ có thể trả lời bằng lời (chat gõ tay hoặc g
 
 from __future__ import annotations
 
-# Chỉ dẫn cho LLM (bước ⑤). Tiếng Việt mô tả ý — LLM tự dịch sang lang khách.
+# Chỉ dẫn cho LLM (bước ⑤).
 INSTRUCTION = {
     "GREETING": "Chào khách, giới thiệu là trợ lý AI đặt lịch massage, hỏi khách cần gì.",
     "SHOP": "Hỏi khách muốn đặt ở cửa hàng nào, ĐỌC RÕ danh sách cửa hàng trong facts.",
@@ -34,92 +34,34 @@ INSTRUCTION = {
 
 # Câu mẫu offline. {…} là chỗ điền facts.
 FAKE = {
-    "GREETING": {
-        "vi": "Dạ em là trợ lý đặt lịch massage. Em có thể giúp anh/chị đặt lịch ạ. Anh/chị cần gì ạ?",
-        "en": "Hi! I'm the massage booking assistant. How can I help you book today?",
-    },
-    "SHOP": {
-        "vi": "Anh/chị muốn đặt ở cửa hàng nào ạ? Hiện có: {cua_hang_list}.",
-        "en": "Which shop would you like to book? We have: {cua_hang_list}.",
-    },
-    "DATE": {
-        "vi": "Anh/chị muốn đặt vào ngày nào ạ? {ngay_list}",
-        "en": "What date would you like? {ngay_list}",
-    },
-    "PARTY_SIZE": {
-        "vi": "Anh/chị đặt cho mấy người ạ? (tối đa 3 người mỗi lượt)",
-        "en": "For how many people? (up to 3 per booking)",
-    },
-    "COURSE": {
-        "vi": "Anh/chị chọn giúp em gói dịch vụ chính ạ: {course_list}.",
-        "en": "Please pick a main course: {course_list}.",
-    },
+    "GREETING": "Dạ em là trợ lý đặt lịch massage. Em có thể giúp anh/chị đặt lịch ạ. Anh/chị cần gì ạ?",
+    "SHOP": "Anh/chị muốn đặt ở cửa hàng nào ạ? Hiện có: {cua_hang_list}.",
+    "DATE": "Anh/chị muốn đặt vào ngày nào ạ? {ngay_list}",
+    "PARTY_SIZE": "Anh/chị đặt cho mấy người ạ? (tối đa 3 người mỗi lượt)",
+    "COURSE": "Anh/chị chọn giúp em gói dịch vụ chính ạ: {course_list}.",
     # Câu soạn động trong nlg._addon_prompt_line (đọc danh sách add-on + cho nói 'không').
     # ADDON ở _LITERAL_SAFE_KEYS nên luôn dùng câu này, không qua LLM.
-    "ADDON": {
-        "vi": "{addon_line}",
-        "en": "{addon_line}",
-    },
-    "SLOT": {
-        "vi": "Các khung giờ còn trống: {slots}. Anh/chị chọn giờ nào ạ?",
-        "en": "Available times: {slots}. Which one works for you?",
-    },
-    "THERAPIST": {
-        "vi": "Anh/chị có muốn chỉ định nhân viên không ạ? {nhan_vien_list}"
-              "Anh/chị có thể chọn theo tên, theo giới tính (nam/nữ), hoặc để cửa hàng sắp giúp.",
-        "en": "Any therapist preference? {nhan_vien_list}"
-              "You can pick by name, by gender (male/female), or let us assign one.",
-    },
-    "CONTACT": {
-        "vi": "Anh/chị cho em xin {hoi} để giữ chỗ và gửi mã đặt chỗ ạ.",
-        "en": "Could you share your {hoi} so we can hold the slot and send the booking code?",
-    },
-    "CONFIRM": {
-        "vi": "Em xin xác nhận đơn: {summary}. Anh/chị đồng ý đặt chứ ạ?",
-        "en": "Please confirm: {summary}. Shall I book it?",
-    },
-    "DONE": {
-        "vi": "Đặt thành công ạ! Mã đặt chỗ {booking_code} đã gửi vào email của anh/chị. "
-              "Anh/chị muốn sửa hoặc hủy thì nhắn em nhé.{sua_nhanh}",
-        "en": "Booked! Your code {booking_code} was emailed to you. "
-              "Just tell me if you'd like to change or cancel it.{sua_nhanh}",
-    },
-    "UPDATED": {
-        "vi": "Đã cập nhật lịch {booking_code} theo thông tin mới ạ. Email xác nhận đã được gửi lại.{sua_nhanh}",
-        "en": "Your booking {booking_code} has been updated. A confirmation email was sent.{sua_nhanh}",
-    },
-    "CANCELLED": {
-        "vi": "Đã hủy lịch {booking_code} ạ. Rất mong được phục vụ anh/chị lần sau!",
-        "en": "Booking {booking_code} has been cancelled. Hope to see you again!",
-    },
-    "MODIFY": {
-        "vi": "Anh/chị muốn đổi phần nào ạ — giờ, số người, hay dịch vụ? "
+    "ADDON": "{addon_line}",
+    "SLOT": "Các khung giờ còn trống: {slots}. Anh/chị chọn giờ nào ạ?",
+    "THERAPIST": "Anh/chị có muốn chỉ định nhân viên không ạ? {nhan_vien_list}"
+                 "Anh/chị có thể chọn theo tên, theo giới tính (nam/nữ), hoặc để cửa hàng sắp giúp.",
+    "CONTACT": "Anh/chị cho em xin {hoi} để giữ chỗ và gửi mã đặt chỗ ạ.",
+    "CONFIRM": "Em xin xác nhận đơn: {summary}. Anh/chị đồng ý đặt chứ ạ?",
+    "DONE": "Đặt thành công ạ! Mã đặt chỗ {booking_code} đã gửi vào email của anh/chị. "
+            "Anh/chị muốn sửa hoặc hủy thì nhắn em nhé.{sua_nhanh}",
+    "UPDATED": "Đã cập nhật lịch {booking_code} theo thông tin mới ạ. Email xác nhận đã được gửi lại.{sua_nhanh}",
+    "CANCELLED": "Đã hủy lịch {booking_code} ạ. Rất mong được phục vụ anh/chị lần sau!",
+    "MODIFY": "Anh/chị muốn đổi phần nào ạ — giờ, số người, hay dịch vụ? "
               "Hoặc nói “hủy lịch” để hủy, “giữ nguyên” nếu thôi không đổi.{sua_nhanh}",
-        "en": "What would you like to change — the time, party size, or service? "
-              "Or say “cancel” to cancel, or “keep it” to leave it as is.{sua_nhanh}",
-    },
-    "END": {
-        "vi": "{message} Anh/chị vui lòng liên hệ hỗ trợ: {shop_phone}.",
-        "en": "{message} Please contact the shop: {shop_phone}.",
-    },
-    "HANDOFF": {
-        "vi": "{message}Anh/chị vui lòng gọi để được hỗ trợ nhé: {shop_phone}.",
-        "en": "{message}Please call the shop directly for assistance: {shop_phone}.",
-    },
-    "REPROMPT": {
-        "vi": "Dạ em chưa rõ ý anh/chị. Anh/chị nói lại ngắn gọn giúp em nhé.",
-        "en": "Sorry, I didn't catch that. Could you rephrase briefly?",
-    },
-    "ERROR": {
-        "vi": "{message}",
-        "en": "{message}",
-    },
+    "END": "{message} Anh/chị vui lòng liên hệ hỗ trợ: {shop_phone}.",
+    "HANDOFF": "{message}Anh/chị vui lòng gọi để được hỗ trợ nhé: {shop_phone}.",
+    "REPROMPT": "Dạ em chưa rõ ý anh/chị. Anh/chị nói lại ngắn gọn giúp em nhé.",
+    "ERROR": "{message}",
 }
 
 
-def fake_sentence(key: str, lang: str, facts: dict) -> str:
-    per_lang = FAKE.get(key, FAKE["REPROMPT"])
-    template = per_lang.get(lang) or per_lang.get("vi") or ""
+def fake_sentence(key: str, facts: dict) -> str:
+    template = FAKE.get(key, FAKE["REPROMPT"])
     try:
         return template.format(**facts)
     except (KeyError, IndexError):

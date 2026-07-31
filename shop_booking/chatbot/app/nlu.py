@@ -41,7 +41,7 @@ _NLU_SYSTEM = (
 #  Public                                                                      #
 # --------------------------------------------------------------------------- #
 
-def extract(masked_text: str, lang: str, llm: RealLLMClient | None) -> dict | None:
+def extract(masked_text: str, llm: RealLLMClient | None) -> dict | None:
     """Trả {'intent', 'entities'} đã validate, hoặc None nếu không trích được (hỏi lại)."""
     if llm is None:
         parsed = _rule_based(masked_text)
@@ -52,7 +52,7 @@ def extract(masked_text: str, lang: str, llm: RealLLMClient | None) -> dict | No
             today = date.today()
             raw = llm.complete(
                 _NLU_SYSTEM,
-                f"[lang={lang}] [Hôm nay={today.isoformat()} ({today:%A})] {masked_text}",
+                f"[Hôm nay={today.isoformat()} ({today:%A})] {masked_text}",
                 temperature=0.0, max_tokens=400, response_json=True,
             )
             parsed = validate_schema(_parse_json(raw))
@@ -67,11 +67,11 @@ def extract(masked_text: str, lang: str, llm: RealLLMClient | None) -> dict | No
             source = "rule_based (LLM lỗi hoặc JSON sai schema)"
 
     if parsed is None:
-        logger.warning("nlu: không trích được gì từ %r (lang=%s) -> hỏi lại", masked_text, lang)
+        logger.warning("nlu: không trích được gì từ %r -> hỏi lại", masked_text)
         return None
     parsed["entities"] = _normalize_entities(parsed["entities"])  # date tương đối -> ISO
-    logger.info("nlu: text=%r lang=%s source=%s -> intent=%s entities=%s",
-                masked_text, lang, source, parsed["intent"], parsed["entities"])
+    logger.info("nlu: text=%r source=%s -> intent=%s entities=%s",
+                masked_text, source, parsed["intent"], parsed["entities"])
     return parsed
 
 
@@ -108,9 +108,9 @@ def _normalize_entities(entities: dict) -> dict:
     return entities
 
 
-_REL_TODAY = {"today", "hôm nay", "hom nay", "nay"}
-_REL_TOMORROW = {"tomorrow", "ngày mai", "ngay mai", "mai"}
-_REL_DAY_AFTER = {"day after tomorrow", "ngày kia", "ngay kia", "mốt", "mot"}
+_REL_TODAY = {"hôm nay", "hom nay", "nay"}
+_REL_TOMORROW = {"ngày mai", "ngay mai", "mai"}
+_REL_DAY_AFTER = {"ngày kia", "ngay kia", "mốt", "mot"}
 
 
 def _match_rel(low: str, words: set[str]) -> bool:
@@ -137,9 +137,8 @@ def parse_date_freeform(text: str, *, allow_bare_day: bool = False,
     """Diễn giải NGÀY khách gõ tự do -> 'YYYY-MM-DD', lấy lần xuất hiện GẦN NHẤT >= hôm nay.
 
     Hiểu: ISO đầy đủ; tương đối (hôm nay/mai/mốt…); 'd/m' · 'd-m' · 'd.m' (+ năm tùy chọn);
-    'ngày D [tháng M]' · 'D tháng M' · 'day D'; kiểu Nhật '(M月)?D日'. Khi `allow_bare_day`
-    thì hiểu cả SỐ TRẦN 'D' — chỉ bật khi ĐANG hỏi ngày, để '3' ở bước khác không bị hiểu
-    nhầm là ngày mùng 3.
+    'ngày D [tháng M]' · 'D tháng M'. Khi `allow_bare_day` thì hiểu cả SỐ TRẦN 'D' — chỉ
+    bật khi ĐANG hỏi ngày, để '3' ở bước khác không bị hiểu nhầm là ngày mùng 3.
 
     Thiếu tháng -> chọn tháng gần nhất mà ngày đó còn ở tương lai (vd hôm nay 27/7, gõ '5'
     -> 5/8). Không hợp lệ (vd '31/2', '99') -> None để bot hỏi lại."""
@@ -160,8 +159,8 @@ def parse_date_freeform(text: str, *, allow_bare_day: bool = False,
             return (today + timedelta(days=delta)).isoformat()
 
     day = month = None
-    m = re.search(r"\b(?:ngày|ngay|day)\s*0*(\d{1,2})"              # ngày D [tháng M] / day D
-                  r"(?:\s*(?:tháng|thang|month|[/.\-])\s*0*(\d{1,2}))?", low)
+    m = re.search(r"\b(?:ngày|ngay)\s*0*(\d{1,2})"                  # ngày D [tháng M]
+                  r"(?:\s*(?:tháng|thang|[/.\-])\s*0*(\d{1,2}))?", low)
     if m:
         day, month = int(m[1]), (int(m[2]) if m[2] else None)
     if day is None:                                                 # D tháng M
@@ -220,40 +219,14 @@ def _resolve_next_date(day: int, month: int | None, today: date) -> str | None:
     return None
 
 
-_EMAIL_STRIP = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
-_PLACEHOLDER_STRIP = re.compile(r"\{\{[^}]+\}\}")
-_LONGNUM_STRIP = re.compile(r"\d[\d\-.\s]{5,}\d")
-
-
-# Khách CHỌN ngôn ngữ bằng lời — cần cho kênh gọi điện (không gõ/bấm gì được). Chỉ khớp
-# khi CẢ câu là tên ngôn ngữ, để "english massage" không bị hiểu nhầm thành chọn tiếng Anh.
-_LANG_CHOICE = {
-    "vi": {"tiếng việt", "tieng viet", "vietnamese"},
-    "en": {"english", "tiếng anh", "tieng anh"},
-}
-
-
-def detect_lang_choice(text: str) -> str | None:
-    """'Tiếng Việt'/'English' -> mã lang; câu khác -> None."""
-    low = (text or "").strip().lower().strip(".!? ")
-    for lang, phrases in _LANG_CHOICE.items():
-        if low in phrases:
-            return lang
-    return None
-
-
-# Khách từ chối / bỏ qua bước hiện tại ("không thêm gì", "thôi", "no thanks"). Dùng ở
-# bước ADDON để sang người kế, và ở THERAPIST để bỏ chỉ định.
-_NEGATIVE_WORDS = ("không", "khong", "thôi", "thoi", "bỏ qua", "bo qua", "miễn", "mien",
-                   "no thanks", "no thank", "nothing", "none", "no add", "skip", "nope")
-_NEGATIVE_EXACT = {"không", "khong", "no", "ko", "k", "thôi", "thoi", "nope", "none", "skip"}
+# Khách từ chối / bỏ qua bước hiện tại ("không thêm gì", "thôi"). Dùng ở bước ADDON để
+# sang người kế, và ở THERAPIST để bỏ chỉ định.
+_NEGATIVE_WORDS = ("không", "khong", "thôi", "thoi", "bỏ qua", "bo qua", "miễn", "mien")
+_NEGATIVE_EXACT = {"không", "khong", "ko", "k", "thôi", "thoi"}
 
 
 def is_negative(text: str) -> bool:
-    """Câu mang ý 'không / bỏ qua'. Bắt cả câu ngắn trần ('không', 'no') lẫn cụm trong câu.
-
-    'no' KHÔNG nằm trong _NEGATIVE_WORDS (chỉ khớp nguyên câu) vì nó là chuỗi con của quá
-    nhiều từ ('nothing', 'không' viết liền…) — bắt rộng ở đây sẽ nuốt nhầm câu chọn add-on."""
+    """Câu mang ý 'không / bỏ qua'. Bắt cả câu ngắn trần ('không', 'ko') lẫn cụm trong câu."""
     low = (text or "").strip().lower().strip(".!? ")
     if low in _NEGATIVE_EXACT:
         return True
@@ -262,12 +235,10 @@ def is_negative(text: str) -> bool:
 
 # Khách nói muốn đổi phần nào của lịch đã đặt (UC-02) — thay cho menu nút "đổi gì" cũ.
 _MODIFY_TARGETS = (
-    ("keep",   ("giữ nguyên", "giu nguyen", "thôi không đổi", "thoi khong doi", "keep",
-                "leave it", "nothing")),
-    ("slot",   ("giờ", "gio", "thời gian", "thoi gian", "time", "hour", "schedule")),
-    ("party",  ("số người", "so nguoi", "mấy người", "may nguoi", "party", "people",
-                "guest", "person")),
-    ("course", ("dịch vụ", "dich vu", "gói", "goi", "course", "service", "package")),
+    ("keep",   ("giữ nguyên", "giu nguyen", "thôi không đổi", "thoi khong doi")),
+    ("slot",   ("giờ", "gio", "thời gian", "thoi gian")),
+    ("party",  ("số người", "so nguoi", "mấy người", "may nguoi")),
+    ("course", ("dịch vụ", "dich vu", "gói", "goi", "course")),
 )
 
 
@@ -290,52 +261,6 @@ def detect_modify_target(text: str) -> str | None:
     return None
 
 
-# Từ khóa nhận diện ngôn ngữ khi câu KHÔNG có dấu tiếng Việt. Cố ý không đưa vào đây các
-# từ trùng với DỮ LIỆU của mình (tên cửa hàng/course/add-on như "shop", "foot", "oil") —
-# đó là lựa chọn khách đọc lại, không phải tín hiệu ngôn ngữ.
-_VI_WORDS = {
-    "toi", "minh", "muon", "can", "dat", "lich", "hen", "ngay", "gio", "phut", "nguoi",
-    "khong", "duoc", "giup", "gium", "nhe", "a", "cua", "hang", "may", "bao", "nhieu",
-    "roi", "chua", "luc", "vao", "cho", "voi", "va", "hay", "the", "nao", "sang", "chieu",
-    "toi_nay", "mai", "mot", "hai", "ba", "bon", "sau", "bay", "tam", "chin", "muoi",
-}
-_EN_WORDS = {
-    "i", "you", "we", "my", "me", "want", "would", "like", "need", "please", "book",
-    "booking", "can", "could", "and", "for", "at", "with", "is", "are", "do", "does",
-    "hello", "hi", "thanks", "thank", "yes", "no", "tomorrow", "today", "people",
-    "person", "morning", "afternoon", "evening", "available", "change", "cancel",
-}
-_WORD_RE = re.compile(r"[a-z]+")
-
-
-def detect_lang(text: str) -> str | None:
-    """Nhận diện ngôn ngữ từ tin nhắn (§7). None -> GIỮ NGUYÊN ngôn ngữ đang dùng.
-
-    BỎ email/SĐT/mã/placeholder trước khi đoán: chữ Latin trong email hay mã KHÔNG phải
-    tín hiệu tiếng Anh.
-
-    KHÔNG dùng luật cũ "có chữ Latin = tiếng Anh": tiếng Việt gõ KHÔNG DẤU
-    ("toi muon dat lich") và cả giờ giấc ("16h30" — chữ 'h') đều toàn chữ Latin, nên luật
-    đó làm bot lật sang tiếng Anh giữa chừng hội thoại. Nay phải có TỪ đặc trưng mới đổi;
-    không đủ căn cứ thì trả None để giữ nguyên."""
-    cleaned = _EMAIL_STRIP.sub(" ", text)
-    cleaned = _PLACEHOLDER_STRIP.sub(" ", cleaned)
-    cleaned = _LONGNUM_STRIP.sub(" ", cleaned)
-    # Ạ-ỹ (Latin Extended Additional) phủ TOÀN BỘ nguyên âm dấu tổ hợp (ế ệ ố ộ
-    # ớ ợ ứ ự ắ ặ ấ ậ...) — liệt kê tay trước đây sót nhóm này nên "Tiếng Việt" (có ế/ệ)
-    # không khớp ký tự Việt nào, rơi xuống nhánh [a-zA-Z] và bị đoán thành "en".
-    if re.search(r"[ăâđêôơưàáãèéìíòóõùúýĩũẠ-ỹ]", cleaned, re.IGNORECASE):
-        return "vi"
-
-    words = set(_WORD_RE.findall(cleaned.lower()))
-    vi_hits, en_hits = len(words & _VI_WORDS), len(words & _EN_WORDS)
-    if vi_hits > en_hits:
-        return "vi"
-    if en_hits > vi_hits:
-        return "en"
-    return None
-
-
 # --------------------------------------------------------------------------- #
 #  Internals                                                                   #
 # --------------------------------------------------------------------------- #
@@ -352,13 +277,12 @@ def _parse_json(raw: str):
         return None
 
 
-_HANDOFF_WORDS = ("nhân viên", "người thật", "gặp người", "gọi cửa hàng", "tổng đài",
-                  "agent", "human", "staff")
+_HANDOFF_WORDS = ("nhân viên", "người thật", "gặp người", "gọi cửa hàng", "tổng đài")
+# "cancel"/"ok"/"oke" giữ lại: từ mượn khách Việt vẫn hay gõ.
 _CANCEL_WORDS = ("hủy", "huỷ", "cancel")
-_MODIFY_WORDS = ("sửa", "đổi lịch", "thay đổi", "reschedule")
-_YES_WORDS = ("đồng ý", "xác nhận", "đúng rồi", "chốt", "vâng", "ok", "oke", "yes",
-              "correct", "confirm")
-_NO_WORDS = ("không phải", "sai rồi", "chưa đúng", "no", "not")
+_MODIFY_WORDS = ("sửa", "đổi lịch", "thay đổi")
+_YES_WORDS = ("đồng ý", "xác nhận", "đúng rồi", "chốt", "vâng", "ok", "oke")
+_NO_WORDS = ("không phải", "sai rồi", "chưa đúng")
 
 
 def _rule_based(text: str) -> dict:
@@ -388,21 +312,21 @@ def _rule_based(text: str) -> dict:
             entities["time"] = f"{hh:02d}:{mm:02d}"
 
     # party_size
-    m = re.search(r"\b(\d+)\s*(?:người|ng|people|person)\b", low)
+    m = re.search(r"\b(\d+)\s*(?:người|nguoi|ng)\b", low)
     if m:
         entities["party_size"] = int(m.group(1))
 
     # duration
-    m = re.search(r"\b(\d+)\s*(?:phút|phut|min|minutes)\b", low)
+    m = re.search(r"\b(\d+)\s*(?:phút|phut)\b", low)
     if m:
         entities["duration"] = int(m.group(1))
 
     # therapist
-    if re.search(r"\b(nữ|nu|female)\b", low):
+    if re.search(r"\b(nữ|nu)\b", low):
         entities["therapist"] = "female"
-    elif re.search(r"\b(nam|male)\b", low):
+    elif re.search(r"\b(nam)\b", low):
         entities["therapist"] = "male"
-    elif re.search(r"(không chỉ định|ai cũng được|bất kỳ|skip|no preference)", low):
+    elif re.search(r"(không chỉ định|ai cũng được|bất kỳ)", low):
         entities["therapist"] = "none"
 
     # confirm

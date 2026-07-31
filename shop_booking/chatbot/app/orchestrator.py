@@ -23,9 +23,28 @@ from app.session import Session, SessionStore
 from app.shop_api_client import ShopApiClient, ShopApiError
 
 
-# Bước mà câu trả lời của khách là TÊN lấy từ dữ liệu (shop/course/add-on/nhân viên), không
-# phải câu nói bình thường -> không dùng để đoán ngôn ngữ.
-_LANG_NEUTRAL_STATES = {S.SHOP, S.COURSE, S.ADDON, S.THERAPIST}
+def _name_matches(query: str, name: str) -> bool:
+    """Khớp tên khách nói với tên trong dữ liệu (shop/course/add-on/nhân viên).
+
+    Khớp nguyên văn, hoặc chuỗi-con HAI CHIỀU nhưng chỉ khi query đủ dài (≥3 ký tự) —
+    input 1-2 ký tự ("a", "to") là chuỗi con của quá nhiều tên, dễ trúng bừa mục đầu tiên
+    có chữ đó. Query ngắn chỉ nhận khi bằng đúng MỘT TỪ trong tên."""
+    q = (query or "").strip().lower()
+    n = (name or "").strip().lower()
+    if not q or not n:
+        return False
+    if q == n:
+        return True
+    if len(q) >= 3:
+        return q in n or n in q
+    return q in n.split()
+
+
+def _pick_unique(query: str, items: list[dict]) -> dict | None:
+    """Item DUY NHẤT có tên khớp query; 0 hoặc ≥2 item khớp -> None. Mơ hồ thì hỏi lại chứ
+    không chọn bừa cái đầu tiên — vd "cửa hàng" là chuỗi con của MỌI tên cửa hàng."""
+    hits = [it for it in items if _name_matches(query, it.get("name") or "")]
+    return hits[0] if len(hits) == 1 else None
 
 
 @dataclass
@@ -56,16 +75,10 @@ class Orchestrator:
     # ------------------------------------------------------------------ #
     #  Vòng 1 lượt                                                        #
     # ------------------------------------------------------------------ #
-    def handle_turn(self, conversation_id: str | None, user_text: str,
-                    lang_hint: str | None = None) -> BotReply:
+    def handle_turn(self, conversation_id: str | None, user_text: str) -> BotReply:
         cid = conversation_id or str(uuid.uuid4())
         session = self.store.load(cid) or Session(conversation_id=cid)
         session.turn_count += 1
-        if lang_hint:
-            session.lang = lang_hint
-        if self.settings.force_lang:          # FORCE_LANG: chốt cứng, bỏ mọi cơ chế tự đoán
-            session.lang = self.settings.force_lang
-            session.lang_locked = True
 
         # Mở chat (text rỗng) -> câu chào.
         if not (user_text or "").strip():
@@ -81,15 +94,8 @@ class Orchestrator:
         # "31" = ngày, "Shop A" = tên cửa hàng, "không" = không thêm add-on.
         asked = sm.next_state(session)
 
-        # Khách CHỌN ngôn ngữ bằng LỜI ("Tiếng Việt"/"English"). Bỏ qua NLU: cả câu chỉ là
-        # tên ngôn ngữ, không có tham số gì để trích (khỏi tốn một lượt gọi LLM vô ích).
-        # FORCE_LANG bật thì kể cả yêu cầu tường minh cũng không đổi (đúng nghĩa "cố định").
-        if not self.settings.force_lang and \
-                (lang_choice := nlu.detect_lang_choice(user_text)) is not None:
-            session.lang = lang_choice
-            session.lang_locked = True
         # Đang ở menu "đổi gì" (UC-02): câu này là chọn phần muốn đổi, không phải câu đặt mới.
-        elif session.editing and nlu.is_cancel_request(user_text):
+        if session.editing and nlu.is_cancel_request(user_text):
             return self._cancel(session)
         elif session.editing and (target := nlu.detect_modify_target(user_text)) is not None:
             sm.apply_modify_target(session, target)
@@ -99,22 +105,10 @@ class Orchestrator:
             masked = pii.mask(user_text, session.vault, extra_values=extra)
             session.history.append({"role": "user", "masked_text": masked})
 
-            parsed = nlu.extract(masked, session.lang, self.llm)
+            parsed = nlu.extract(masked, self.llm)
             if parsed is None:                       # sai schema -> hỏi lại (§3.4)
                 return self._reply(session, "REPROMPT", {})
 
-            # Đã chọn ngôn ngữ thì tôn trọng, không đoán. Cũng KHÔNG đoán ở các bước chọn từ
-            # danh sách: câu trả lời khi đó là TÊN dữ liệu của mình ("Shop A", "Foot") —
-            # toàn chữ Latin nhưng không phải tín hiệu tiếng Anh, đoán theo sẽ làm bot lật
-            # qua lại vi/en giữa chừng hội thoại.
-            if not session.lang_locked and asked not in _LANG_NEUTRAL_STATES:
-                lang = nlu.detect_lang(user_text)
-                if lang:
-                    # CHỐT luôn cho cả phiên: đoán đi đoán lại mỗi lượt là nguồn gốc việc bot
-                    # đang nói tiếng Việt bỗng nhảy sang tiếng Anh giữa chừng. Khách muốn đổi
-                    # thì nói thẳng "English"/"Tiếng Việt" (detect_lang_choice ở trên).
-                    session.lang = lang
-                    session.lang_locked = True
             if parsed["intent"] == "handoff":
                 return self._handoff(session)
 
@@ -538,21 +532,17 @@ class Orchestrator:
     #  Màn chào                                                           #
     # ------------------------------------------------------------------ #
     def _greeting(self, session: Session) -> BotReply:
-        # Câu chào cố định (không qua LLM để không tự đoán ngôn ngữ). Nói rõ đây là trợ lý AI
-        # ngay từ đầu — yêu cầu minh bạch APPI (§6.3.4). Không còn nút chọn ngôn ngữ: chào
-        # song ngữ rồi tự nhận ngôn ngữ theo câu khách trả lời (detect_lang), khách nói
-        # "English"/"Tiếng Việt" giữa chừng vẫn đổi được (detect_lang_choice).
-        # Kèm luôn danh sách cửa hàng để khách chọn được ngay từ câu đầu; tên cửa hàng là
-        # DỮ LIỆU nên chỉ đọc một dòng chung, không dịch. API lỗi -> vẫn chào bình thường.
+        # Câu chào cố định (không qua LLM). Nói rõ đây là trợ lý AI ngay từ đầu — yêu cầu
+        # minh bạch APPI (§6.3.4). Kèm luôn danh sách cửa hàng để khách chọn được ngay từ
+        # câu đầu; API lỗi -> vẫn chào bình thường.
         try:
             names = ", ".join(sh["name"] for sh in self._get_shops())
         except ShopApiError:
             names = ""
-        shops_line = f"\n🏬 Cửa hàng / Shops: {names}." if names else ""
+        shops_line = f"\n🏬 Cửa hàng: {names}." if names else ""
         text = (
             "Xin chào 👋 Em là trợ lý đặt lịch AI, em giúp anh/chị đặt lịch massage ạ. "
-            "Anh/chị muốn đặt ở cửa hàng nào ạ?\n"
-            "Hi! I'm the AI booking assistant — which shop would you like to book?"
+            "Anh/chị muốn đặt ở cửa hàng nào ạ?"
             f"{shops_line}"
         )
         session.history.append({"role": "bot", "masked_text": text})
@@ -568,7 +558,7 @@ class Orchestrator:
     #  ⑤⑥ dựng câu, unmask, lưu session                                  #
     # ------------------------------------------------------------------ #
     def _reply(self, session: Session, render_key: str, api_result: dict) -> BotReply:
-        prompt = nlg.build_prompt(render_key, session, api_result, session.lang)
+        prompt = nlg.build_prompt(render_key, session, api_result)
         reply = nlg.generate(prompt, self.llm)                     # ⑥ NLG (LLM hoặc fake)
         session.history.append({"role": "bot", "masked_text": reply})
         reply = pii.unmask(reply, session.vault)                   # trả PII thật cho widget khách
@@ -599,18 +589,19 @@ class Orchestrator:
         if not s.email:
             s.email = next((k for k in session.vault if k.startswith("{{email_")), None)
 
-    def _match_course(self, session: Session, courses: list[dict]) -> bool:
-        """Map course_text (gợi ý NLU) -> course_id nếu tên khớp; không khớp thì hỏi lại."""
+    @staticmethod
+    def _match_course(session: Session, courses: list[dict]) -> bool:
+        """Map course_text (gợi ý NLU) -> course_id nếu tên khớp DUY NHẤT; không khớp hay
+        mơ hồ (vd "Momihogushi" trúng cả 4 mức thời lượng) thì hỏi lại."""
         s = session.slots
         if s.course_id or not s.course_text:
             return False
-        text = s.course_text.lower()
-        s.course_text = None                  # tiêu thụ xong, tránh map lại ở lượt sau
-        for c in courses:
-            if text in c["name"].lower() or c["name"].lower() in text:
-                s.course_id = c["id"]
-                return True
-        return False
+        text, s.course_text = s.course_text, None      # tiêu thụ xong, tránh map lại lượt sau
+        c = _pick_unique(text, courses)
+        if c is None:
+            return False
+        s.course_id = c["id"]
+        return True
 
     @staticmethod
     def _capture_choice_text(session: Session, asked: str, user_text: str) -> None:
@@ -647,15 +638,13 @@ class Orchestrator:
         if not wanted:
             return False
 
+        allowed = [a for a in addons
+                   if not (s.course_id and s.course_id in (a.get("restricted_course_ids") or []))]
         picked: list[int] = []
-        for a in addons:
-            if s.course_id and s.course_id in (a.get("restricted_course_ids") or []):
-                continue
-            name = (a.get("name") or "").lower()
-            if not name:
-                continue
-            if any(t == name or t in name or name in t for t in wanted):
-                picked.append(a["id"])
+        for t in wanted:
+            hit = _pick_unique(t, allowed)    # mơ hồ (1 tên trúng ≥2 add-on) -> bỏ, hỏi lại
+            if hit is not None and hit["id"] not in picked:
+                picked.append(hit["id"])
         if not picked:                        # đọc tên không khớp add-on nào -> hỏi lại
             return False
 
@@ -667,40 +656,34 @@ class Orchestrator:
 
     @staticmethod
     def _match_shop(session: Session, shops: list[dict]) -> bool:
-        """Map tên cửa hàng khách nêu (shop_text, vd 'Sendai') -> shop_id. Khớp -> chọn luôn,
-        khỏi hỏi lại. Không khớp -> bỏ gợi ý để bot đọc lại danh sách cho khách chọn."""
+        """Map tên cửa hàng khách nêu (shop_text, vd 'Sendai') -> shop_id. Khớp DUY NHẤT ->
+        chọn luôn, khỏi hỏi lại. Không khớp / mơ hồ -> bot đọc lại danh sách cho khách chọn."""
         s = session.slots
         if s.shop_id is not None or not s.shop_text:
             return False
-        text = s.shop_text.strip().lower()
-        for sh in shops:
-            name = sh["name"].lower()
-            if text == name or text in name or name in text:
-                s.shop_id = sh["id"]
-                s.shop_text = None
-                return True
-        s.shop_text = None
-        return False
+        text, s.shop_text = s.shop_text, None
+        sh = _pick_unique(text, shops)
+        if sh is None:
+            return False
+        s.shop_id = sh["id"]
+        return True
 
     @staticmethod
     def _match_therapist(session: Session, therapists: list[dict]) -> bool:
         """Map tên nhân viên khách nêu (therapist_text, vd 'Hana') -> therapist_id.
-        Khớp -> chỉ định luôn, khỏi hỏi. Không khớp -> bỏ hint để khách chọn bằng nút."""
+        Khớp DUY NHẤT -> chỉ định luôn, khỏi hỏi. Không khớp / mơ hồ -> đọc lại danh sách."""
         s = session.slots
         if s.therapist_decided or not s.therapist_text:
             return False
-        text = s.therapist_text.strip().lower()
-        for t in therapists:
-            name = t["name"].lower()
-            if text == name or text in name or name in text:
-                s.therapist_id = t["id"]
-                s.therapist_gender = None
-                s.therapist_decided = True
-                s.therapist_text = None       # đã dùng xong -> tránh map lại (vd khi kín lịch)
-                s.slot = None; s.confirm = None
-                return True
-        s.therapist_text = None               # tên không khớp ai -> bot đọc lại danh sách
-        return False
+        text, s.therapist_text = s.therapist_text, None   # tiêu thụ xong, tránh map lại
+        t = _pick_unique(text, therapists)
+        if t is None:
+            return False
+        s.therapist_id = t["id"]
+        s.therapist_gender = None
+        s.therapist_decided = True
+        s.slot = None; s.confirm = None       # giờ trống phụ thuộc người phục vụ -> chọn lại giờ
+        return True
 
     @staticmethod
     def _future_slots(slots: list[str], date_str: str | None) -> list[str]:

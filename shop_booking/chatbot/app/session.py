@@ -56,8 +56,6 @@ class Slots:
 class Session:
     conversation_id: str
     state: str = "GREETING"
-    lang: str = "vi"
-    lang_locked: bool = False               # khách đã CHỌN ngôn ngữ -> ngừng tự đoán
     slots: Slots = field(default_factory=Slots)
     vault: dict[str, str] = field(default_factory=dict)
     booking_code: Optional[str] = None

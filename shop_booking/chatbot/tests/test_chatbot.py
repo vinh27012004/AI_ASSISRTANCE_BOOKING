@@ -277,40 +277,15 @@ def test_order_slots_keeps_last_and_full_range():
           "có giờ mong muốn -> 6 giờ gần 15:00, theo thứ tự thời gian")
 
 
-def test_language_selection_and_lock():
-    """Nói tên ngôn ngữ (không còn nút) -> khoá ngôn ngữ đó, KHÔNG tự đoán lại."""
+def test_greeting_reads_shops():
+    """Màn chào: nói rõ là AI, không nút, ĐỌC luôn danh sách cửa hàng, tiếng Việt."""
     api = StubApi()
     orch = _orch(api)
-    r = orch.handle_turn("cl", "")                          # mở chat -> câu chào song ngữ
+    r = orch.handle_turn("cl", "")                          # mở chat -> câu chào
     check(r.ui["buttons"] == [], "không còn nút lựa chọn nào")
     check("AI" in r.reply_text, "câu chào nói rõ là trợ lý AI (minh bạch APPI)")
     check("Shop A" in r.reply_text, "câu chào ĐỌC luôn danh sách cửa hàng để chọn được ngay")
-
-    r = orch.handle_turn("cl", "English")                   # chọn English bằng lời
-    check(r.state == S.SHOP, "chọn ngôn ngữ xong -> hỏi cửa hàng")
-    check("shop" in r.reply_text.lower(), "câu hỏi cửa hàng bằng tiếng Anh (fake template en)")
-
-    # Đã khoá 'en': gõ câu tiếng Việt cũng KHÔNG lật ngôn ngữ.
-    orch.handle_turn("cl", "Shop A")
-    orch.handle_turn("cl", "cho tôi đặt lịch ngày mai với")  # có dấu tiếng Việt
-    ses = orch.store.load("cl")
-    check(ses.lang == "en" and ses.lang_locked is True, "đã chọn en -> giữ en dù gõ tiếng Việt")
-
-
-def test_lang_not_flipped_by_data_names():
-    """Tên cửa hàng/add-on ('Shop A', 'Foot') toàn chữ Latin nhưng là DỮ LIỆU, không phải
-    tín hiệu tiếng Anh — không được làm bot lật sang en giữa chừng."""
-    api = StubApi()
-    orch = _orch(api)
-    orch.handle_turn("clf", "")
-    r = orch.handle_turn("clf", "Shop A")               # tên cửa hàng, không phải câu tiếng Anh
-    check(orch.store.load("clf").lang == "vi", "chọn shop bằng tên KHÔNG lật ngôn ngữ sang en")
-    check("Anh/chị" in r.reply_text, "vẫn hỏi tiếp bằng tiếng Việt")
-
-    # Câu tiếng Anh THẬT thì vẫn đổi được (ở bước không phải chọn-từ-danh-sách).
-    orch.handle_turn("clf", _FUTURE_DATE)
-    r = orch.handle_turn("clf", "I want to book for two people")
-    check(orch.store.load("clf").lang == "en", "câu tiếng Anh thật -> vẫn đổi sang en")
+    check("Anh/chị" in r.reply_text, "câu chào bằng tiếng Việt")
 
 
 def test_shop_by_name_free_text():
@@ -321,6 +296,36 @@ def test_shop_by_name_free_text():
     r = orch.handle_turn("csn", "Shop A")
     check(orch.store.load("csn").slots.shop_id == 1, "nói tên -> map đúng shop_id")
     check(r.state == S.DATE, f"chọn được shop -> hỏi ngày, đang {r.state}")
+
+
+def test_name_matching_tightened():
+    """Khớp tên bị siết: input quá ngắn hay mơ hồ (trúng ≥2 tên) -> KHÔNG chọn bừa."""
+    shops = [{"id": 1, "name": "Cửa hàng Morioka"},
+             {"id": 2, "name": "Cửa hàng Sendai"},
+             {"id": 3, "name": "Cửa hàng Tokyo Shibuya"}]
+
+    def _try(text):
+        ses = Session(conversation_id="c", turn_count=1)
+        ses.slots.shop_text = text
+        ok = Orchestrator._match_shop(ses, shops)
+        return ok, ses.slots.shop_id
+
+    check(_try("Tokyo") == (True, 3), "'Tokyo' (≥3 ký tự, duy nhất) -> khớp shop 3")
+    check(_try("a") == (False, None), "'a' 1 ký tự -> không chọn bừa shop đầu tiên có chữ a")
+    check(_try("To") == (False, None), "'To' 2 ký tự không phải nguyên từ -> hỏi lại")
+    check(_try("cửa hàng") == (False, None),
+          "'cửa hàng' trúng MỌI tên (mơ hồ) -> hỏi lại, không lấy cái đầu tiên")
+    check(_try("Cửa hàng Sendai") == (True, 2), "tên đầy đủ -> vẫn khớp bình thường")
+
+    # Course mơ hồ: "Momihogushi" trúng cả 2 mức thời lượng -> không tự chọn mức nào.
+    courses = [{"id": 20, "name": "Momihogushi 30"}, {"id": 21, "name": "Momihogushi 60"}]
+    ses = Session(conversation_id="c", turn_count=1)
+    ses.slots.course_text = "Momihogushi"
+    check(Orchestrator._match_course(ses, courses) is False and ses.slots.course_id is None,
+          "'Momihogushi' mơ hồ giữa 30/60 phút -> hỏi lại, không tự chọn mức")
+    ses.slots.course_text = "Momihogushi 60"
+    check(Orchestrator._match_course(ses, courses) is True and ses.slots.course_id == 21,
+          "'Momihogushi 60' đủ rõ -> khớp đúng mức 60 phút")
 
 
 class _HallucinatingLLM:
@@ -335,18 +340,18 @@ def test_literal_renders_never_use_llm():
     from app.session import Session as Ses
     llm = _HallucinatingLLM()
 
-    p = nlg.build_prompt("END", Ses(conversation_id="c", lang="vi"),
-                         {"message": "Số này bị chặn.", "shop_phone": "0258123456"}, "vi")
+    p = nlg.build_prompt("END", Ses(conversation_id="c"),
+                         {"message": "Số này bị chặn.", "shop_phone": "0258123456"})
     out = nlg.generate(p, llm)
     check("0258123456" in out and "019-999-9999" not in out, "END: số điện thoại phải THẬT")
 
-    ses = Ses(conversation_id="c", lang="vi", booking_code="20260726-S001-AB12")
-    p2 = nlg.build_prompt("DONE", ses, {}, "vi")
+    ses = Ses(conversation_id="c", booking_code="20260726-S001-AB12")
+    p2 = nlg.build_prompt("DONE", ses, {})
     out2 = nlg.generate(p2, llm)
     check("20260726-S001-AB12" in out2 and "99999999" not in out2, "DONE: mã đặt chỗ phải THẬT")
 
     # Câu hỏi thường (SHOP) vẫn được dùng LLM cho tự nhiên.
-    p3 = nlg.build_prompt("SHOP", Ses(conversation_id="c", lang="vi"), {"shops": []}, "vi")
+    p3 = nlg.build_prompt("SHOP", Ses(conversation_id="c"), {"shops": []})
     check("019-999-9999" in nlg.generate(p3, llm), "SHOP (không số liệu nhạy cảm) vẫn qua LLM")
 
 
@@ -430,64 +435,13 @@ def test_shop_closed_all_days_routes_back_to_shop():
     check(orch.store.load("csc").slots.shop_id is None, "bỏ shop đã chọn để khách chọn lại")
 
 
-def test_detect_lang_ignores_pii():
-    """Gõ SĐT + email KHÔNG được coi là tiếng Anh (bug bot nhảy sang EN ở CONTACT)."""
-    from app import nlu
-    check(nlu.detect_lang("0123456789 abc@gmail.com") is None,
-          "SĐT + email -> không đủ tín hiệu ngôn ngữ (giữ nguyên tiếng đang dùng)")
-    check(nlu.detect_lang("cho tôi đặt lịch nhé") == "vi", "câu có dấu -> vi")
-    check(nlu.detect_lang("I want to book a massage") == "en", "câu tiếng Anh thật -> en")
-
-
-def test_detect_lang_no_false_english():
-    """Không được đoán bừa 'en' chỉ vì có chữ Latin: '16h30' (chữ h) và tiếng Việt KHÔNG DẤU
-    từng làm bot lật sang tiếng Anh giữa chừng."""
-    from app import nlu
-    check(nlu.detect_lang("16h30") is None, "'16h30' -> không đủ căn cứ, giữ nguyên ngôn ngữ")
-    check(nlu.detect_lang("8h") is None, "'8h' -> không phải tiếng Anh")
-    check(nlu.detect_lang("ok") is None, "'ok' dùng chung hai tiếng -> không đổi")
-    check(nlu.detect_lang("Foot") is None, "tên add-on -> không phải tín hiệu ngôn ngữ")
-    check(nlu.detect_lang("toi muon dat lich ngay mai") == "vi",
-          "tiếng Việt KHÔNG DẤU vẫn nhận đúng là vi")
-
-
-def test_lang_locked_after_first_detection():
-    """Nhận ra ngôn ngữ 1 lần rồi thì CHỐT cả phiên — không lật lại giữa chừng."""
-    api = StubApi()
-    orch = _orch(api)
-    orch.handle_turn("clk", "")
-    orch.handle_turn("clk", "Shop A")
-    orch.handle_turn("clk", "toi muon dat ngay mai")     # tiếng Việt không dấu -> vi + chốt
-    ses = orch.store.load("clk")
-    check(ses.lang == "vi" and ses.lang_locked is True, "nhận ra vi -> chốt cho cả phiên")
-    orch.handle_turn("clk", "2 people please")           # câu tiếng Anh sau đó KHÔNG lật nữa
-    check(orch.store.load("clk").lang == "vi", "đã chốt -> không tự đổi ngôn ngữ giữa chừng")
-
-
-def test_force_lang_env_pins_language():
-    """FORCE_LANG ép cứng: tự đoán lẫn yêu cầu đổi tường minh của khách đều không đổi được."""
-    api = StubApi()
-    settings = Settings(
-        shop_api_base_url="http://x/api/v1", llm_base_url="", llm_api_key="", llm_model="m",
-        redis_url="", session_ttl_seconds=1800, vault_enc_key="", fallback_shop_phone="",
-        force_lang="vi",
-    )
-    orch = Orchestrator(InMemorySessionStore(), api, None, settings)
-    orch.handle_turn("cfl", "")
-    orch.handle_turn("cfl", "I want to book a massage")   # câu tiếng Anh thật
-    check(orch.store.load("cfl").lang == "vi", "FORCE_LANG -> không tự đoán sang en")
-    r = orch.handle_turn("cfl", "English")                # yêu cầu đổi tường minh
-    check(orch.store.load("cfl").lang == "vi", "FORCE_LANG -> kể cả xin đổi cũng giữ nguyên")
-    check("Anh/chị" in r.reply_text, "câu trả lời vẫn bằng tiếng Việt")
-
-
 def test_contact_asks_only_missing():
     """Đã cho số điện thoại -> chỉ hỏi email, không hỏi lại cả hai."""
     from app import nlg
     from app.session import Session as Ses, Slots as Sl
-    p = nlg.build_prompt("CONTACT", Ses(conversation_id="c", lang="vi", slots=Sl(phone="{{phone_1}}")), {}, "vi")
+    p = nlg.build_prompt("CONTACT", Ses(conversation_id="c", slots=Sl(phone="{{phone_1}}")), {})
     check(p["facts"]["hoi"] == "email", "đã có SĐT -> chỉ hỏi email")
-    p2 = nlg.build_prompt("CONTACT", Ses(conversation_id="c", lang="vi"), {}, "vi")
+    p2 = nlg.build_prompt("CONTACT", Ses(conversation_id="c"), {})
     check("số điện thoại" in p2["facts"]["hoi"] and "email" in p2["facts"]["hoi"],
           "chưa có gì -> hỏi cả số điện thoại và email")
 
@@ -636,9 +590,8 @@ def test_addon_group_prompt_shows_person_index():
     người 2 nhìn giống hỏi lại người 1)."""
     from app import nlg
     from app.session import Session as Ses, Slots as Sl
-    ses = Ses(conversation_id="c", lang="vi",
-              slots=Sl(party_size=2, course_id=3, guest_addons=[[7], []], addon_guest_idx=1))
-    p = nlg.build_prompt("ADDON", ses, {"addons": []}, "vi")
+    ses = Ses(conversation_id="c", slots=Sl(party_size=2, course_id=3, guest_addons=[[7], []], addon_guest_idx=1))
+    p = nlg.build_prompt("ADDON", ses, {"addons": []})
     out = nlg.generate(p, _HallucinatingLLM())     # dù có LLM, ADDON vẫn ép template tất định
     check("Người 2/2" in out, "ADDON nhóm phải nêu rõ đang hỏi Người 2/2")
 
@@ -654,9 +607,8 @@ def test_addon_prompt_reads_list_and_hides_restricted():
         {"id": 8, "name": "Hot Stone", "duration_min": 15, "price": 1000,
          "restricted_course_ids": [3]},          # cấm với course 3
     ]}
-    ses = Ses(conversation_id="c", lang="vi",
-              slots=Sl(party_size=1, course_id=3, guest_addons=[[]], addon_guest_idx=0))
-    out = nlg.generate(nlg.build_prompt("ADDON", ses, ar, "vi"), None)
+    ses = Ses(conversation_id="c", slots=Sl(party_size=1, course_id=3, guest_addons=[[]], addon_guest_idx=0))
+    out = nlg.generate(nlg.build_prompt("ADDON", ses, ar), None)
     check("Aroma Oil" in out, "đọc tên add-on hợp lệ ra cho khách chọn")
     check("Hot Stone" not in out, "add-on bị cấm với course đang chọn KHÔNG được mời (BR-09)")
     check("không" in out.lower(), "có hướng dẫn nói 'không' để bỏ qua")
@@ -726,7 +678,7 @@ class _NonJsonLLM:
 def test_nlu_falls_back_when_llm_not_json():
     """LLM trả text thường -> KHÔNG trả None (khỏi REPROMPT oan); rule-based bắt được ý."""
     from app import nlu
-    parsed = nlu.extract("đồng ý đặt", "vi", _NonJsonLLM())
+    parsed = nlu.extract("đồng ý đặt", _NonJsonLLM())
     check(parsed is not None, "router trả text -> extract vẫn có kết quả (không None)")
     check(parsed["entities"]["confirm"] == "yes", "rule-based bắt 'đồng ý' -> confirm=yes")
 
@@ -851,18 +803,16 @@ def test_summary_hides_unresolved_phone_placeholder():
     """Vault đã rút -> tóm tắt CONFIRM KHÔNG rò rỉ '{{phone_1}}' (bug user thấy)."""
     from app import nlg
     from app.session import Session as Ses, Slots as Sl
-    ses = Ses(conversation_id="c", lang="vi",
-              slots=Sl(date=_FUTURE_DATE, slot="14:00", party_size=1, course_name="C",
+    ses = Ses(conversation_id="c", slots=Sl(date=_FUTURE_DATE, slot="14:00", party_size=1, course_name="C",
                        phone="{{phone_1}}"))
     ses.vault = {}                                     # vault rút -> phone không giải được
-    summ = nlg.build_prompt("CONFIRM", ses, {}, "vi")["facts"]["summary"]
+    summ = nlg.build_prompt("CONFIRM", ses, {})["facts"]["summary"]
     check("{{phone_1}}" not in summ, "không rò rỉ placeholder khi vault đã rút")
 
-    ses2 = Ses(conversation_id="c", lang="vi",
-               slots=Sl(date=_FUTURE_DATE, slot="14:00", party_size=1, course_name="C",
+    ses2 = Ses(conversation_id="c", slots=Sl(date=_FUTURE_DATE, slot="14:00", party_size=1, course_name="C",
                         phone="{{phone_1}}"))
     ses2.vault = {"{{phone_1}}": "0901234567"}
-    summ2 = nlg.build_prompt("CONFIRM", ses2, {}, "vi")["facts"]["summary"]
+    summ2 = nlg.build_prompt("CONFIRM", ses2, {})["facts"]["summary"]
     check("{{phone_1}}" in summ2, "vault còn -> vẫn nêu SĐT (placeholder, unmask sau)")
 
 
@@ -882,7 +832,7 @@ def test_quick_edit_note_live_and_expired():
     """Còn giờ -> 'còn khoảng m:ss'; hết 2' -> nhắc cần nhập lại email."""
     from app import nlg
     from app.session import Session as Ses
-    ses = Ses(conversation_id="c", lang="vi", booking_code="X",
+    ses = Ses(conversation_id="c", booking_code="X",
               edit_token_expires_at=time.time() + 90)
     check("còn khoảng" in nlg._quick_edit_note(ses), "còn thời gian -> 'còn khoảng m:ss'")
     ses.edit_token_expires_at = time.time() - 1
@@ -891,21 +841,15 @@ def test_quick_edit_note_live_and_expired():
     check(nlg._quick_edit_note(ses) == "", "chưa có mốc -> không hiện gì")
 
 
-def test_reply_localized_by_lang():
-    """Câu trả lời đổi theo ngôn ngữ, và vẫn ĐỌC đủ danh sách lựa chọn ra (không còn nút)."""
+def test_reply_reads_choice_lists():
+    """Câu trả lời (tiếng Việt) phải ĐỌC đủ danh sách lựa chọn ra — không còn nút."""
     from app import nlg
     from app.session import Session as Ses
 
     ar = {"shops": [{"name": "Shop A"}, {"name": "Shop B"}]}
-    vi = nlg.generate(nlg.build_prompt("SHOP", Ses(conversation_id="c", lang="vi"), ar, "vi"), None)
-    check("Shop A" in vi and "Shop B" in vi, "vi: đọc đủ tên cửa hàng")
-
-    en = nlg.generate(nlg.build_prompt("SHOP", Ses(conversation_id="c", lang="en"), ar, "en"), None)
-    check("Shop A" in en and "shop" in en.lower(), "en: câu tiếng Anh, vẫn đủ lựa chọn")
-
-    # Ngôn ngữ KHÔNG hỗ trợ (đã bỏ tiếng Nhật) -> lùi về 'vi' thay vì vỡ template.
-    other = nlg.generate(nlg.build_prompt("SHOP", Ses(conversation_id="c", lang="ja"), ar, "ja"), None)
-    check("Shop A" in other, "ngôn ngữ không hỗ trợ -> lùi về tiếng Việt, không mất dữ liệu")
+    out = nlg.generate(nlg.build_prompt("SHOP", Ses(conversation_id="c"), ar), None)
+    check("Shop A" in out and "Shop B" in out, "đọc đủ tên cửa hàng")
+    check("Anh/chị" in out, "câu bằng tiếng Việt")
 
 
 def test_slot_by_spoken_time():
