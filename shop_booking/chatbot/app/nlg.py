@@ -124,6 +124,10 @@ def _facts_for(state_key: str, session: Session, api_result: dict) -> dict:
         times = ar.get("slots") or ar.get("suggested_slots") or []
         facts["gio_trong"] = times
         facts["slots"] = ", ".join(times) if times else "(chưa có)"
+        # Khách đã nêu một giờ nhưng giờ đó hết chỗ -> nói thẳng ra, đừng lặng lẽ đọc danh
+        # sách khác (khách sẽ tưởng bot bỏ qua lời mình).
+        het = ar.get("wanted_time_unavailable")
+        facts["gio_het"] = f"Giờ {het} không còn trống ạ. " if het else ""
     elif state_key == "CONFIRM":
         facts["summary"] = _order_summary(session, ar)
     elif state_key in ("DONE", "UPDATED", "CANCELLED"):
@@ -228,8 +232,12 @@ def _order_summary(session: Session, api_result: dict) -> str:
     """Đọc lại đơn ở CONFIRM. Dùng tên course/giờ; SĐT/email để placeholder (unmask ở cuối)."""
     s = session.slots
     parts = []
+    # Tên CỬA HÀNG phải có: đây là thứ khách chọn đầu tiên và cũng là thứ dễ nhầm nhất khi
+    # đặt nhiều chi nhánh — thiếu nó khách không xác nhận được đơn có đúng chỗ mình muốn.
+    if s.shop_name:
+        parts.append(s.shop_name)
     if s.date:
-        parts.append(f"ngày {s.date}")
+        parts.append(f"ngày {format_date_list([s.date])}")   # 5/8 thay vì 2026-08-05
     if s.slot:
         parts.append(f"lúc {s.slot}")
     if s.party_size:

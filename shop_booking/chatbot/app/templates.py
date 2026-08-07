@@ -42,7 +42,7 @@ FAKE = {
     # Câu soạn động trong nlg._addon_prompt_line (đọc danh sách add-on + cho nói 'không').
     # ADDON ở _LITERAL_SAFE_KEYS nên luôn dùng câu này, không qua LLM.
     "ADDON": "{addon_line}",
-    "SLOT": "Các khung giờ còn trống: {slots}. Anh/chị chọn giờ nào ạ?",
+    "SLOT": "{gio_het}Các khung giờ còn trống: {slots}. Anh/chị chọn giờ nào ạ?",
     "THERAPIST": "Anh/chị có muốn chỉ định nhân viên không ạ? {nhan_vien_list}"
                  "Anh/chị có thể chọn theo tên, theo giới tính (nam/nữ), hoặc để cửa hàng sắp giúp.",
     "CONTACT": "Anh/chị cho em xin {hoi} để giữ chỗ và gửi mã đặt chỗ ạ.",

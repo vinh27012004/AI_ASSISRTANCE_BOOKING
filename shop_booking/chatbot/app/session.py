@@ -19,6 +19,7 @@ class Slots:
     id qua tool response mới thành `*_id` (DD §2.3) — không tin nguyên văn."""
 
     shop_id: Optional[int] = None
+    shop_name: Optional[str] = None       # cache tên shop đã chọn (đọc lại ở CONFIRM)
     date: Optional[str] = None            # YYYY-MM-DD
     party_size: Optional[int] = None      # 1..3
     duration: Optional[int] = None        # phút

@@ -303,11 +303,14 @@ def _rule_based(text: str) -> dict:
     # bước hiện tại; số trần diễn giải theo ngữ cảnh ở orchestrator bước DATE).
     entities["date"] = parse_date_freeform(low, allow_bare_day=False)
 
-    # time: "8:00", "8h", "8 giờ", "14:30"
+    # time: "8:00", "8h", "8 giờ", "14:30", "7h tối"
     m = re.search(r"\b(\d{1,2})(?::|h|\s*giờ)(\d{2})?\b", low)
     if m:
         hh = int(m.group(1))
         mm = int(m.group(2)) if m.group(2) else 0
+        # "7h tối" = 19:00 chứ không phải 07:00 — buổi nói sau giờ nên regex trên không thấy.
+        if hh < 12 and re.search(r"(tối|toi|chiều|chieu|đêm|dem)", low):
+            hh += 12
         if 0 <= hh <= 23 and 0 <= mm <= 59:
             entities["time"] = f"{hh:02d}:{mm:02d}"
 

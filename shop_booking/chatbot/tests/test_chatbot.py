@@ -298,6 +298,80 @@ def test_shop_by_name_free_text():
     check(r.state == S.DATE, f"chọn được shop -> hỏi ngày, đang {r.state}")
 
 
+def test_rule_based_evening_time():
+    """Nhánh không-LLM: '7h tối' phải là 19:00, không phải 07:00."""
+    from app import nlu
+    check(nlu._rule_based("7h tối nay")["entities"]["time"] == "19:00", "'7h tối' -> 19:00")
+    check(nlu._rule_based("2h chiều")["entities"]["time"] == "14:00", "'2h chiều' -> 14:00")
+    check(nlu._rule_based("9h sáng")["entities"]["time"] == "09:00", "'9h sáng' giữ nguyên 09:00")
+    check(nlu._rule_based("16h30")["entities"]["time"] == "16:30", "giờ 24h giữ nguyên")
+
+
+def test_bare_number_at_party_step():
+    """Đang hỏi SỐ NGƯỜI mà khách gõ số trần '3' -> hiểu là 3 người, không hỏi lại.
+    (Log thật: LLM trả chitchat/null cho '3', khách phải gõ lại '3 người'.)"""
+    api = StubApi()
+    orch = _orch(api)
+    _drive(orch, "cbn", "", "Shop A", _FUTURE_DATE)
+    r = orch.handle_turn("cbn", "3")
+    check(orch.store.load("cbn").slots.party_size == 3, "'3' khi đang hỏi số người -> 3 người")
+    check(r.state == S.COURSE, f"hiểu xong -> hỏi gói dịch vụ, đang {r.state}")
+
+    # Số trần > 3 vẫn vào nhánh handoff (BR-14), không set party_size.
+    orch2 = _orch(StubApi())
+    _drive(orch2, "cbn2", "", "Shop A", _FUTURE_DATE)
+    orch2.handle_turn("cbn2", "5")
+    check(orch2.store.load("cbn2").slots.party_size is None, "'5' -> quá 3 người, không nhận")
+
+
+def test_confirm_summary_includes_shop():
+    """Tóm tắt ở CONFIRM phải nêu TÊN CỬA HÀNG (khách từng phải gõ 'Thiếu thông tin cửa hàng')."""
+    api = StubApi()
+    orch = _orch(api)
+    r = _drive(orch, "csum", "", "Shop A", _FUTURE_DATE, "1 người",
+               "Toàn thân", "không", "ai cũng được", "14:00", "0901234567 a@b.com")
+    check(r.state == S.CONFIRM, f"tới bước xác nhận, đang {r.state}")
+    check("Shop A" in r.reply_text, "tóm tắt đơn phải có tên cửa hàng")
+    check("14:00" in r.reply_text and "Toàn thân" in r.reply_text, "vẫn đủ giờ + gói dịch vụ")
+
+
+def test_addon_no_does_not_reject_order():
+    """'Không' ở bước ADDON = không thêm add-on, KHÔNG được hiểu thành từ chối cả đơn."""
+    api = StubApi()
+    orch = _orch(api)
+    _drive(orch, "cad", "", "Shop A", _FUTURE_DATE, "1 người", "Toàn thân")
+    orch.handle_turn("cad", "không")
+    check(orch.store.load("cad").slots.confirm is None,
+          "'không' ở ADDON không được set confirm='no'")
+
+
+def test_unavailable_time_is_announced():
+    """Khách nêu giờ đã hết -> bot NÓI RÕ giờ đó hết, không lặng lẽ đọc danh sách khác."""
+    api = StubApi()                                    # slots: 14:00, 14:15, 15:00
+    orch = _orch(api)
+    _drive(orch, "cut", "", "Shop A", _FUTURE_DATE, "1 người",
+           "Toàn thân", "không", "ai cũng được")
+    r = orch.handle_turn("cut", "19:00")               # giờ shop không có
+    check("19:00" in r.reply_text and "không còn trống" in r.reply_text,
+          "phải báo rõ giờ khách nêu đã hết")
+    check("14:00" in r.reply_text, "vẫn đọc các giờ còn trống để khách chọn lại")
+    # Đã báo rồi -> lượt sau không lặp lại câu "19:00 không còn trống".
+    r2 = orch.handle_turn("cut", "chọn giúp tôi giờ khác")
+    check("19:00 không còn trống" not in r2.reply_text, "không lặp lại thông báo đã nói")
+
+
+def test_services_not_called_twice_per_turn():
+    """Khớp được tên gói -> tiến thẳng sang ADDON; cả hai bước cần /services nhưng chỉ
+    được gọi API MỘT lần (log thật: 2 lời gọi y hệt cách nhau 30ms)."""
+    api = StubApi()
+    orch = _orch(api)
+    _drive(orch, "csv", "", "Shop A", _FUTURE_DATE, "1 người")
+    before = api.calls.count("services")
+    orch.handle_turn("csv", "Toàn thân")               # COURSE khớp -> nhảy sang ADDON
+    added = api.calls.count("services") - before
+    check(added <= 1, f"không được gọi /services 2 lần trong 1 lượt, đang {added}")
+
+
 def test_name_matching_tightened():
     """Khớp tên bị siết: input quá ngắn hay mơ hồ (trúng ≥2 tên) -> KHÔNG chọn bừa."""
     shops = [{"id": 1, "name": "Cửa hàng Morioka"},

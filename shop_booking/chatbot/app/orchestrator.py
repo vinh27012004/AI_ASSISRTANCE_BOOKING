@@ -71,6 +71,10 @@ class Orchestrator:
         self._shops_cache: tuple[float, list[dict]] | None = None
         # shop_id -> (epoch, list[ISO ngày mở cửa). Cache 5' để khỏi dò lại mỗi lượt.
         self._avail_cache: dict[int, tuple[float, list[str]]] = {}
+        # (shop_id, date, party_size) -> (epoch, data). Bước COURSE khớp được tên rồi tiến
+        # thẳng sang ADDON, mà cả hai bước đều cần /services -> nếu không cache thì MỘT lượt
+        # chat gọi API hai lần liên tiếp với y hệt tham số.
+        self._services_cache: dict[tuple, tuple[float, dict]] = {}
 
     # ------------------------------------------------------------------ #
     #  Vòng 1 lượt                                                        #
@@ -134,11 +138,24 @@ class Orchestrator:
                 if iso:
                     sm.merge_params(session, {"date": iso})
 
+            # Đang hỏi SỐ NGƯỜI mà khách trả lời số trần ("3") — NLU stateless cũng bỏ
+            # (log thật: LLM trả chitchat/null cho '3' khiến bot hỏi lại); ở đây có ngữ
+            # cảnh nên diễn giải thành số người. merge_params tự xử lý >3 (party_over).
+            bare = (user_text or "").strip()
+            if asked == S.PARTY_SIZE and session.slots.party_size is None \
+                    and bare.isdigit() and len(bare) <= 2:
+                sm.merge_params(session, {"party_size": int(bare)})
+
             # Đang hỏi ADD-ON mà khách nói "không"/"thôi" -> người này không thêm, sang người
             # kế (BR-10). Chỉ hiểu được theo ngữ cảnh: cùng chữ "không" ở bước CONFIRM lại
             # mang nghĩa từ chối đơn.
             if asked == S.ADDON and nlu.is_negative(user_text):
                 sm.skip_addon_guest(session)
+                # "Không" ở đây nghĩa là KHÔNG THÊM ADD-ON, không phải từ chối cả đơn —
+                # nhưng NLU (stateless) trả confirm='no'. Gỡ ra, nếu không đơn mang sẵn
+                # trạng thái "đã từ chối" tới tận bước CONFIRM.
+                if session.slots.confirm == "no":
+                    session.slots.confirm = None
             else:
                 self._capture_choice_text(session, asked, user_text)
 
@@ -185,7 +202,7 @@ class Orchestrator:
                 return {"active_dates": active}
 
             if st == S.COURSE:
-                data = self.api.get_services(s.shop_id, s.date, s.party_size)
+                data = self._get_services(s.shop_id, s.date, s.party_size)
                 if data.get("reason") == "SHOP_CLOSED":           # A1 (200 rỗng, không phải lỗi)
                     from datetime import date as _date, timedelta as _td
 
@@ -216,7 +233,7 @@ class Orchestrator:
 
             if st == S.ADDON:                                     # bước RIÊNG: add-on từng người
                 s.ensure_guest_addons()                           # BR-10: mỗi người 1 danh sách
-                data = self.api.get_services(s.shop_id, s.date, s.party_size)
+                data = self._get_services(s.shop_id, s.date, s.party_size)
                 self._cache_course(session, data.get("courses", []))
                 addons = data.get("addons", [])
                 if self._match_addons(session, addons):
@@ -247,13 +264,21 @@ class Orchestrator:
                     return {"render_key": "ERROR",
                             "message": "Ngày này không còn khung giờ trống, anh/chị chọn giúp ngày khác nhé."}
                 # Khách đã NÓI đúng một giờ còn trống -> chốt luôn, khỏi hỏi lại (thay cho
-                # nút giờ trước đây). Giờ khách nói mà kín lịch thì rơi xuống mời chọn lại.
+                # nút giờ trước đây).
                 if s.wanted_time and s.wanted_time in slots:
                     s.slot = s.wanted_time
                     s.wanted_time = None
                     session.state = sm.next_state(session)
                     return self._run_state_action(session)
-                return {"slots": self._order_slots(slots, s.wanted_time)}
+                # Giờ khách nêu KHÔNG còn trống -> phải NÓI RÕ là giờ đó hết, rồi mới đọc
+                # danh sách. Trước đây chỉ đọc danh sách nên khách tưởng bot bỏ qua lời mình
+                # (vd nói "7h tối nay" mà shop chỉ mở tới 16:30).
+                wanted = s.wanted_time
+                s.wanted_time = None          # đã báo rồi -> đừng lặp lại ở lượt sau
+                if wanted:
+                    return {"slots": self._order_slots(slots, wanted),
+                            "wanted_time_unavailable": wanted}
+                return {"slots": self._order_slots(slots, None)}
 
             if st == S.THERAPIST:
                 data = self.api.get_therapists(s.shop_id, s.date)
@@ -666,6 +691,7 @@ class Orchestrator:
         if sh is None:
             return False
         s.shop_id = sh["id"]
+        s.shop_name = sh.get("name")      # để đọc lại ở CONFIRM (khách cần thấy đặt shop nào)
         return True
 
     @staticmethod
@@ -754,6 +780,20 @@ class Orchestrator:
             except (ValueError, IndexError):
                 pass
         return chrono
+
+    _SERVICES_TTL = 60          # course/add-on ít đổi; đủ ngắn để admin sửa xong là thấy ngay
+
+    def _get_services(self, shop_id: int | None, date: str | None,
+                      party_size: int | None) -> dict:
+        """GET /services có cache ngắn theo (shop, ngày, số người) — xem _services_cache."""
+        key = (shop_id, date, party_size)
+        now = time.time()
+        hit = self._services_cache.get(key)
+        if hit and now - hit[0] < self._SERVICES_TTL:
+            return hit[1]
+        data = self.api.get_services(shop_id, date, party_size)
+        self._services_cache[key] = (now, data)
+        return data
 
     def _get_shops(self) -> list[dict]:
         now = time.time()
