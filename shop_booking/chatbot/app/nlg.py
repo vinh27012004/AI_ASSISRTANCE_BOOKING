@@ -15,6 +15,7 @@ import logging
 import time
 
 from app import pii, templates
+from app import turnlog
 from app.llm_client import LLMError, RealLLMClient
 from app.session import Session
 
@@ -52,13 +53,18 @@ def build_prompt(state_key: str, session: Session, api_result: dict) -> dict:
 # hay bỏ mất chỉ số này, khiến người 2 nhìn giống hỏi lại người 1. Ép template tất định.
 # MODIFY: menu "đổi gì" — ép template tất định để chèn đồng hồ "sửa nhanh còn ~m:ss" (BR-17)
 # chính xác, không để LLM bịa/bỏ.
-_LITERAL_SAFE_KEYS = {"SLOT", "ADDON", "MODIFY", "END", "HANDOFF", "ERROR", "DONE", "UPDATED", "CANCELLED"}
+# INFO: câu trả lời tra cứu chứa giờ làm/địa chỉ/giá THẬT -> tất định, cấm LLM viết lại.
+_LITERAL_SAFE_KEYS = {"SLOT", "ADDON", "MODIFY", "END", "HANDOFF", "ERROR", "DONE", "UPDATED",
+                      "CANCELLED", "INFO", "OUT_OF_SCOPE"}
 
 
 def generate(prompt: dict, llm: RealLLMClient | None) -> str:
     """Sinh câu. Không router HOẶC câu chứa số/mã thật -> câu mẫu code (khớp chính xác)."""
     if llm is None or prompt["key"] in _LITERAL_SAFE_KEYS:
+        via = "câu mẫu (chưa cấu hình LLM)" if llm is None else "template tất định (cấm LLM bịa số)"
+        turnlog.nlg(prompt["key"], via)
         return templates.fake_sentence(prompt["key"], prompt["facts"])
+    _t0 = time.perf_counter()
     try:
         user = json.dumps(
             {k: prompt[k] for k in ("instruction", "facts")},
@@ -66,11 +72,13 @@ def generate(prompt: dict, llm: RealLLMClient | None) -> str:
         )
         text = llm.complete(_NLG_SYSTEM, user, temperature=0.4, max_tokens=400)
         if text.strip():
+            turnlog.nlg(prompt["key"], "llm", time.perf_counter() - _t0)
             return text.strip()
         # LLM trả rỗng — khách vẫn thấy câu bình thường (câu mẫu) nên lỗi này dễ lọt qua
         # nếu không log riêng ở đây (llm_client.py chỉ thấy "gọi thành công", không biết
         # nội dung rỗng có phải là fallback hay không).
         logger.warning("nlg: LLM trả rỗng cho key=%s -> dùng câu mẫu", prompt["key"])
+        turnlog.nlg(prompt["key"], "câu mẫu (LLM trả rỗng)")
         return templates.fake_sentence(prompt["key"], prompt["facts"])
     except LLMError as e:
         # Khách vẫn nhận được câu trả lời bình thường (câu mẫu offline) nên /chat/message
@@ -78,6 +86,7 @@ def generate(prompt: dict, llm: RealLLMClient | None) -> str:
         # kết nối/HTTP đã log ở app.llm_client, nhưng đó chỉ là log của lời gọi, không nói
         # rõ hậu quả: câu trả lời thực tế khách nhận được có phải hàng thật hay không).
         logger.warning("nlg: LLM lỗi (%s) cho key=%s -> dùng câu mẫu", e, prompt["key"])
+        turnlog.nlg(prompt["key"], f"câu mẫu (LLM lỗi: {e})")
         return templates.fake_sentence(prompt["key"], prompt["facts"])
 
 
@@ -132,6 +141,10 @@ def _facts_for(state_key: str, session: Session, api_result: dict) -> dict:
         facts["summary"] = _order_summary(session, ar)
     elif state_key in ("DONE", "UPDATED", "CANCELLED"):
         facts["booking_code"] = session.booking_code or ""
+    elif state_key in ("INFO", "OUT_OF_SCOPE"):
+        # Câu đã soạn sẵn ở tủ tra cứu (orchestrator._answer_query) — chỉ chuyển tiếp.
+        facts["noi_dung"] = ar.get("noi_dung", "")
+        facts["cau_hoi"] = ar.get("cau_hoi", "")
     elif state_key in ("END", "HANDOFF", "ERROR"):
         facts["message"] = ar.get("message", "")
         facts["shop_phone"] = ar.get("shop_phone") or session.shop_phone or ""
@@ -185,34 +198,33 @@ def _quick_edit_note(session: Session) -> str:
     return live.format(t=f"{left // 60}:{left % 60:02d}") if left > 0 else over
 
 
-# {p}=tiền tố "Người n/m: ", {ds}=danh sách add-on đọc ra cho khách chọn
-_ADDON_LINE = ("{p}Anh/chị muốn thêm dịch vụ bổ sung nào không ạ? Hiện có: {ds}. "
-               "Anh/chị đọc tên dịch vụ muốn thêm, hoặc nói “không” để bỏ qua.")
+# {p}=ghi chú "cả nhóm dùng chung" khi đặt nhóm, {ds}=danh sách add-on đọc ra
+_ADDON_LINE = ("Anh/chị muốn thêm dịch vụ bổ sung nào không ạ? Hiện có: {ds}. "
+               "Anh/chị đọc tên dịch vụ muốn thêm (có thể chọn NHIỀU, đọc liền nhau), "
+               "hoặc nói “không” để bỏ qua.{p}")
 
 
 def _addon_prompt_line(session: Session, api_result: dict) -> str:
-    """Câu hỏi add-on cho NGƯỜI hiện tại (BR-10). Đây là câu tất định (ADDON ở
-    _LITERAL_SAFE_KEYS) nên soạn trọn ở đây, khỏi lệ thuộc LLM.
+    """Câu hỏi add-on. Đây là câu tất định (ADDON ở _LITERAL_SAFE_KEYS) nên soạn trọn ở
+    đây, khỏi lệ thuộc LLM.
 
-    Không còn nút -> phải ĐỌC danh sách add-on ra. Add-on bị cấm với course đang chọn
-    (BR-09) bị loại khỏi danh sách để không mời nhầm (A3 sớm)."""
+    Không còn nút -> phải ĐỌC danh sách add-on ra, và nói rõ CHỌN ĐƯỢC NHIỀU (web tick
+    được nhiều, chat không nói thì khách tưởng chỉ chọn một). Add-on bị cấm với course
+    đang chọn (BR-09) bị loại khỏi danh sách để không mời nhầm (A3 sớm)."""
     s = session.slots
     offered = [
         f'{a.get("name")} · {a.get("duration_min")} phút'
         for a in (api_result or {}).get("addons", [])
         if not (s.course_id and s.course_id in (a.get("restricted_course_ids") or []))
     ]
-    return _ADDON_LINE.format(p=_addon_guest_prefix(session), ds=", ".join(offered))
+    return _ADDON_LINE.format(ds=", ".join(offered), p=_addon_group_note(session))
 
 
-def _addon_guest_prefix(session: Session) -> str:
-    """Tiền tố "Người n/m: " khi đặt NHÓM (add-on riêng từng người — BR-10). Đơn -> ''."""
-    s = session.slots
-    tong = s.party_size or 1
-    if tong <= 1:
-        return ""
-    n = min(s.addon_guest_idx, tong - 1) + 1
-    return f"Người {n}/{tong}: "
+def _addon_group_note(session: Session) -> str:
+    """Đặt NHÓM thì nói rõ add-on áp cho CẢ NHÓM (BR-10, BA cập nhật) — không nói, khách
+    dễ tưởng đang chọn cho riêng một người."""
+    tong = session.slots.party_size or 1
+    return f" Dịch vụ thêm sẽ áp dụng cho cả {tong} người ạ." if tong > 1 else ""
 
 
 def _contact_ask(session: Session) -> str:
@@ -247,9 +259,8 @@ def _order_summary(session: Session, api_result: dict) -> str:
         parts.append(f"gói {course_name}")
     elif s.duration:
         parts.append(f"{s.duration} phút")
-    total_addons = sum(len(g) for g in s.guest_addons)
-    if total_addons:
-        parts.append(f"+{total_addons} dịch vụ thêm")
+    if s.addon_ids:
+        parts.append(f"+{len(s.addon_ids)} dịch vụ thêm")
     if s.therapist_gender:
         parts.append("nhân viên " + ("nữ" if s.therapist_gender == "female" else "nam"))
     elif s.therapist_id:

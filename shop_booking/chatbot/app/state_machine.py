@@ -86,8 +86,7 @@ def merge_params(session: Session, entities: dict) -> None:
 
     addons = entities.get("addons")
     if addons:
-        # Tên add-on khách nói -> gợi ý thô, map id ở orchestrator._match_addons (BR-10:
-        # gán cho ĐÚNG người đang hỏi, nên không đụng guest_addons ở đây).
+        # Tên add-on khách nói -> gợi ý thô, map id ở orchestrator._match_addons.
         s.addon_texts = [str(a) for a in addons if a]
 
     ther = entities.get("therapist")
@@ -164,30 +163,18 @@ def apply_modify_target(session: Session, target: str) -> None:
 
 
 # --------------------------------------------------------------------------- #
-#  Add-on theo từng người (BR-10)                                              #
+#  Add-on dùng CHUNG cho cả nhóm (BR-10, BA cập nhật)                          #
 # --------------------------------------------------------------------------- #
 
-def skip_addon_guest(session: Session) -> None:
-    """Người hiện tại KHÔNG thêm add-on -> sang người kế (hoặc chốt nếu là người cuối)."""
+def skip_addons(session: Session) -> None:
+    """Khách nói "không thêm gì" -> chốt luôn với danh sách rỗng."""
     s = session.slots
-    s.ensure_guest_addons()
-    idx = min(s.addon_guest_idx, len(s.guest_addons) - 1)
-    s.guest_addons[idx] = []
-    advance_addon_guest(s)
+    s.addon_ids = []
+    s.addons_decided = True
 
 
 def reset_addons(s) -> None:
-    """Xóa toàn bộ trạng thái chọn add-on -> hỏi lại từ người 1 (BR-10). Dùng khi đổi
-    course/số người, kể cả lúc sửa lịch."""
-    s.guest_addons = []
+    """Xóa lựa chọn add-on -> hỏi lại. Dùng khi đổi course (BR-09: combo cấm có thể khác)
+    hoặc đổi số người, kể cả lúc sửa lịch."""
+    s.addon_ids = []
     s.addons_decided = False
-    s.addon_guest_idx = 0
-
-
-def advance_addon_guest(s) -> None:
-    """Chuyển sang người kế tiếp để chọn add-on; hết người thì chốt (addons_decided)."""
-    n = s.party_size or 1
-    if s.addon_guest_idx < n - 1:
-        s.addon_guest_idx += 1
-    else:
-        s.addons_decided = True

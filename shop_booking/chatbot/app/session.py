@@ -25,9 +25,10 @@ class Slots:
     duration: Optional[int] = None        # phút
     course_id: Optional[int] = None
     course_name: Optional[str] = None     # cache tên/thời lượng course đã chọn (đọc lại ở CONFIRM)
-    guest_addons: list[list[int]] = field(default_factory=list)  # add-on RIÊNG từng người (BR-10)
-    addon_guest_idx: int = 0              # đang hỏi add-on cho người thứ mấy (0-based)
-    addons_decided: bool = False          # đã chốt add-on cho MỌI người — bước ADDON riêng
+    # BR-10 (BA cập nhật): cả nhóm dùng CHUNG course và add-on -> một danh sách duy nhất,
+    # gửi lặp lại cho từng reservation lúc tạo booking.
+    addon_ids: list[int] = field(default_factory=list)
+    addons_decided: bool = False          # đã chốt add-on (kể cả chốt "không thêm gì")
     slot: Optional[str] = None            # "HH:MM" đã chốt
     therapist_id: Optional[int] = None    # khách chỉ định đích danh (chỉ party_size==1)
     therapist_gender: Optional[str] = None
@@ -43,14 +44,6 @@ class Slots:
     therapist_text: Optional[str] = None
     addon_texts: list[str] = field(default_factory=list)  # tên add-on khách nói, chờ map id
     party_over: bool = False              # khách nói >3 người -> nhánh handoff (BR-14)
-
-    def ensure_guest_addons(self) -> None:
-        """Đảm bảo guest_addons có đúng party_size ô (mỗi người 1 danh sách add-on)."""
-        n = self.party_size or 1
-        while len(self.guest_addons) < n:
-            self.guest_addons.append([])
-        if len(self.guest_addons) > n:
-            del self.guest_addons[n:]
 
 
 @dataclass
@@ -70,6 +63,9 @@ class Session:
     shop_phone: Optional[str] = None                # cache để handoff (A5/A8)
     history: list[dict[str, str]] = field(default_factory=list)   # [{role, masked_text}]
     turn_count: int = 0
+    # Số lượt hỏi NGOÀI PHẠM VI liên tiếp — chạm ngưỡng thì mời gọi cửa hàng, để khách và
+    # bot không quay vòng "em chưa hỗ trợ được" mãi.
+    offtopic_count: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

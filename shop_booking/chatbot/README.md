@@ -44,6 +44,48 @@ Nhờ vậy lõi state machine + PII test được không cần mock LLM (bướ
 | `buttons.py` | Nút lựa chọn shop/course/slot… (§7) |
 | `main.py` · `wsgi.py` | Flask `POST /chat/message` (§2.1, Q3) |
 
+## Hai làn: điền đơn ↔ hỏi thông tin
+
+`handle_turn` có một **chốt gác cửa** (`_is_question`) ngay sau NLU: lượt này là giá trị điền
+vào slots, hay là câu HỎI? Câu hỏi rẽ sang `answers/` (tủ tra cứu) — tra API, trả lời, đọc lại
+câu đang dở, **không đụng `session.state` lẫn `slots`**.
+
+- Loại câu hỏi phủ: giờ mở cửa lúc X (`/timeline`), địa chỉ/SĐT (`/shops`), ngày nghỉ
+  (`/availability`), giá gói (`/services`), cửa hàng cùng khu vực (khớp token địa chỉ).
+- Resolver **không cầm `Session`** (chỉ nhận `QueryCtx` chỉ-đọc). Muốn điền ô thì trả
+  `Answer.suggest` để orchestrator đưa qua `sm.merge_params` — giữ MỘT cửa ghi duy nhất nên
+  `_invalidate` (BR-04/BR-07) vẫn chạy.
+- Câu trả lời chứa số liệu thật -> key `INFO` nằm trong `_LITERAL_SAFE_KEYS`, LLM không viết lại.
+- Nghi ngờ thì ưu tiên luồng đặt lịch: KHÔNG tin một mình `question_type` của NLU (nó gán nhầm
+  "other" cho `Sendai`, "course_price" cho `Gói đầu tiên`) — câu phải có DẤU HIỆU HỎI (`?` hoặc
+  từ để hỏi: nào/đâu/bao nhiêu…) mới được rẽ sang làn hỏi đáp.
+- Lạc đề 3 lượt liên tiếp -> đọc số cửa hàng (`_OFFTOPIC_LIMIT`).
+
+Thêm loại câu hỏi mới = thêm một dòng vào `answers.RESOLVERS`; đây cũng là chỗ cắm FAQ/RAG sau
+này (câu hỏi mà đáp án nằm trong văn bản, không nằm trong bảng nào).
+
+## Đọc log
+
+`logs/chatbot.log` — mỗi lượt chat là MỘT khối, đọc từ trên xuống thấy đủ input → xử lý → output:
+
+```
+┌─ LƯỢT 3 · conv=demo · vào state=GREETING
+│ IN     Cửa hàng Sendai
+│ ①NLU   rule_based 0.00s · intent=book · qt=-
+│ LANE   TASK                         ← điền đơn / QUERY (hỏi) / META (chào, sửa, hủy)
+│ ②GỘP   shop_text: None→'Cửa hàng Sendai'
+│ ③STATE GREETING → SHOP
+│ ④API   GET /shops/2/availability → 200 7ms
+│ ③STATE SHOP → DATE                  ← bước ④ khớp được tên nên đẩy tiếp
+│ ⑥NLG   DATE · câu mẫu
+│ OUT    Anh/chị muốn đặt vào ngày nào ạ? …
+└─ ra state=DATE · 0.01s · shop=2
+```
+
+Khối phát ra một lần ở cuối lượt (`app/turnlog.py`) nên nhiều hội thoại song song không xen kẽ
+nhau. Chi tiết thô — system prompt, raw response LLM, params/body shop_api — nằm ở mức **DEBUG**:
+đặt `LOG_LEVEL=DEBUG` trong `.env` khi cần soi sâu.
+
 ## Quan hệ với BE
 
 Chatbot dùng lại **nguyên bộ API GĐ1** như một client public (giống FE web) — **không** cần thay
@@ -58,7 +100,10 @@ ngày + giờ → trả lại booking cũ).
 `SHOP → DATE → PARTY_SIZE → COURSE → ADDON → THERAPIST(1 người) → SLOT → CONTACT → CONFIRM → CREATE → DONE`
 
 - **Bỏ bước hỏi thời lượng**: mỗi course đã kèm sẵn `duration_min` (hiện luôn trên nút).
-- **COURSE và ADDON là hai bước riêng**: chọn course chính trước, rồi chọn add-on (toggle) hoặc "Không thêm".
+- **COURSE và ADDON là hai bước riêng**: chọn course chính trước, rồi chọn add-on hoặc "Không thêm".
+  Cả nhóm dùng **chung** course và add-on (BR-10, BA cập nhật) — hỏi MỘT lần, không lặp theo từng
+  người. Một câu nêu nhiều add-on ("Ashitsubo với Hot Stone") nhận hết, khớp bằng
+  `matching.pick_all` (không phải `pick_unique` — 2 tên khớp không phải là "mơ hồ" ở đây).
 - **THERAPIST trước SLOT**: chỉ định nhân viên trước → `GET /slots?therapist_id=` chỉ hiện giờ người đó
   thực sự rảnh (không dính "người này bận giờ đó"). Nhóm ≥2 bỏ qua THERAPIST → SLOT hiện mọi giờ. Nếu nhân
   viên chỉ định kín cả ngày → bot mời đổi người / để quán sắp / đổi ngày.

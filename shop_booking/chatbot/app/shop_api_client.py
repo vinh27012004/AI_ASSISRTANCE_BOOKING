@@ -14,7 +14,10 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from time import perf_counter
 from typing import Any, Optional
+
+from app import turnlog
 
 logger = logging.getLogger(__name__)
 
@@ -56,23 +59,29 @@ class ShopApiClient:
             data = json.dumps(body, ensure_ascii=False).encode("utf-8")
             headers["Content-Type"] = "application/json"
 
-        logger.info("shop_api -> [%s] %s %s params=%s body=%s",
-                    call_id, method, path, params, body)
+        # params/body xuống DEBUG: khối tóm tắt lượt (turnlog) đã đủ để đọc luồng, còn
+        # ở đây có cả địa chỉ/PII khách nên càng nên hạn chế ở mức mặc định.
+        logger.debug("shop_api -> [%s] %s %s params=%s body=%s",
+                     call_id, method, path, params, body)
+        t0 = perf_counter()
 
         req = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 raw = resp.read().decode("utf-8")
                 parsed = json.loads(raw) if raw else {}
-                logger.info("shop_api <- [%s] %s %s status=%s body=%s",
-                            call_id, method, path, resp.status, parsed)
+                turnlog.api(method, path, resp.status, (perf_counter() - t0) * 1000)
+                logger.debug("shop_api <- [%s] %s %s status=%s body=%s",
+                             call_id, method, path, resp.status, parsed)
                 return parsed
         except urllib.error.HTTPError as e:
             err = self._to_api_error(e)
+            turnlog.api(method, path, err.code, (perf_counter() - t0) * 1000)
             logger.warning("shop_api <- [%s] %s %s status=%s code=%s message=%s details=%s",
                            call_id, method, path, err.status, err.code, err.message, err.details)
             raise err
         except (urllib.error.URLError, TimeoutError) as e:
+            turnlog.api(method, path, "LỖI KẾT NỐI", (perf_counter() - t0) * 1000)
             logger.error("shop_api <- [%s] %s %s lỗi kết nối: %s", call_id, method, path, e)
             raise ShopApiError(503, "INTERNAL_ERROR", f"Không gọi được shop_api: {e}")
 
@@ -105,6 +114,11 @@ class ShopApiClient:
 
     def get_therapists(self, shop_id: int, date: str) -> dict:
         return self._request("GET", f"/shops/{shop_id}/therapists", params={"date": date})
+
+    def get_timeline(self, shop_id: int, date: str) -> dict:
+        # Lịch từng nhân viên trong ngày (ca làm + khoảng đã đặt) — tủ tra cứu dùng phần
+        # `shifts` để biết cửa hàng có làm vào một GIỜ cụ thể hay không.
+        return self._request("GET", f"/shops/{shop_id}/timeline", params={"date": date})
 
     def get_availability(self, shop_id: int, date_from: str, date_to: str) -> dict:
         # Ngày shop mở/đóng trong [from,to] (mở = có ca) — 1 lần gọi thay vì dò từng ngày.

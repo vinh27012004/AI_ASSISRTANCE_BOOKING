@@ -12,9 +12,9 @@ from __future__ import annotations
 
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 
-from app import nlg, nlu, pii
+from app import answers, matching, nlg, nlu, pii, templates, turnlog
 from app import state_machine as sm
 from app import states as S
 from app.config import Settings
@@ -23,28 +23,30 @@ from app.session import Session, SessionStore
 from app.shop_api_client import ShopApiClient, ShopApiError
 
 
-def _name_matches(query: str, name: str) -> bool:
-    """Khớp tên khách nói với tên trong dữ liệu (shop/course/add-on/nhân viên).
-
-    Khớp nguyên văn, hoặc chuỗi-con HAI CHIỀU nhưng chỉ khi query đủ dài (≥3 ký tự) —
-    input 1-2 ký tự ("a", "to") là chuỗi con của quá nhiều tên, dễ trúng bừa mục đầu tiên
-    có chữ đó. Query ngắn chỉ nhận khi bằng đúng MỘT TỪ trong tên."""
-    q = (query or "").strip().lower()
-    n = (name or "").strip().lower()
-    if not q or not n:
-        return False
-    if q == n:
-        return True
-    if len(q) >= 3:
-        return q in n or n in q
-    return q in n.split()
+# Khớp tên -> app/matching.py (answers/ dùng chung; import ngược vào đây sẽ vòng).
+# Giữ alias tên cũ để _match_shop/_match_course/... và test hiện có không phải sửa.
+_name_matches = matching.name_matches
+_pick_unique = matching.pick_unique
 
 
-def _pick_unique(query: str, items: list[dict]) -> dict | None:
-    """Item DUY NHẤT có tên khớp query; 0 hoặc ≥2 item khớp -> None. Mơ hồ thì hỏi lại chứ
-    không chọn bừa cái đầu tiên — vd "cửa hàng" là chuỗi con của MỌI tên cửa hàng."""
-    hits = [it for it in items if _name_matches(query, it.get("name") or "")]
-    return hits[0] if len(hits) == 1 else None
+class _AnswerApi:
+    """Mặt tiền CHỈ-ĐỌC cho tủ tra cứu: dùng lại cache sẵn có của Orchestrator (shops/
+    services) và thêm cache timeline. Resolver chỉ thấy các hàm ĐỌC, không thấy Session."""
+
+    def __init__(self, orch: "Orchestrator"):
+        self._o = orch
+
+    def get_shops(self):
+        return self._o._get_shops()
+
+    def get_services(self, shop_id, date, party_size=None):
+        return self._o._get_services(shop_id, date, party_size)
+
+    def get_availability(self, shop_id, date_from, date_to):
+        return self._o.api.get_availability(shop_id, date_from, date_to)
+
+    def get_timeline(self, shop_id, date):
+        return self._o._get_timeline(shop_id, date)
 
 
 @dataclass
@@ -75,6 +77,10 @@ class Orchestrator:
         # thẳng sang ADDON, mà cả hai bước đều cần /services -> nếu không cache thì MỘT lượt
         # chat gọi API hai lần liên tiếp với y hệt tham số.
         self._services_cache: dict[tuple, tuple[float, dict]] = {}
+        # (shop_id, date) -> (epoch, data) cho GET /timeline. Câu hỏi "mở lúc mấy giờ" phải
+        # dò LẦN LƯỢT từng cửa hàng nên không cache là mỗi lượt nện API n lần.
+        self._timeline_cache: dict[tuple, tuple[float, dict]] = {}
+        self._answer_api = _AnswerApi(self)
 
     # ------------------------------------------------------------------ #
     #  Vòng 1 lượt                                                        #
@@ -83,14 +89,38 @@ class Orchestrator:
         cid = conversation_id or str(uuid.uuid4())
         session = self.store.load(cid) or Session(conversation_id=cid)
         session.turn_count += 1
+        # Cả lượt gom vào MỘT bản ghi log, phát ra ở finally -> không xen kẽ giữa các hội
+        # thoại chạy song song, và luôn có khối kể cả khi lượt ném ngoại lệ.
+        turnlog.start(cid, session.turn_count, session.state)
+        try:
+            reply = self._handle_turn(session, user_text)
+            turnlog.out(reply.reply_text)
+            return reply
+        finally:
+            turnlog.finish(session.state, self._slots_brief(session))
 
+    @staticmethod
+    def _slots_brief(session: Session) -> str:
+        """Tóm tắt tờ đơn cho dòng cuối khối log — chỉ những ô ĐÃ điền."""
+        s = session.slots
+        got = [(k, v) for k, v in (("shop", s.shop_id), ("ngày", s.date),
+                                   ("người", s.party_size), ("gói", s.course_id),
+                                   ("giờ", s.slot)) if v is not None]
+        brief = " ".join(f"{k}={v}" for k, v in got) or "(đơn trống)"
+        return brief + (f" mã={session.booking_code}" if session.booking_code else "")
+
+    def _handle_turn(self, session: Session, user_text: str) -> BotReply:
         # Mở chat (text rỗng) -> câu chào.
         if not (user_text or "").strip():
+            turnlog.inp("(mở chat)")
+            turnlog.lane("META", "câu chào")
             return self._greeting(session)
 
         # Đang chờ khách NHẬP LẠI EMAIL để xác thực sửa/hủy sau cửa sổ 2' (BR-15) — dòng này
         # là email khách gõ, không phải câu đặt lịch: nạp email rồi làm nốt thao tác đang chờ.
         if session.awaiting_edit_email:
+            turnlog.inp("(email xác thực sửa/hủy)")
+            turnlog.lane("META", "nhập lại email")
             return self._resume_with_edit_email(session, user_text)
 
         # State bot ĐANG hỏi — suy từ slots nên đúng cả khi state đã lưu chưa kịp cập nhật
@@ -100,13 +130,18 @@ class Orchestrator:
 
         # Đang ở menu "đổi gì" (UC-02): câu này là chọn phần muốn đổi, không phải câu đặt mới.
         if session.editing and nlu.is_cancel_request(user_text):
+            turnlog.inp(user_text)
+            turnlog.lane("META", "hủy lịch")
             return self._cancel(session)
         elif session.editing and (target := nlu.detect_modify_target(user_text)) is not None:
+            turnlog.inp(user_text)
+            turnlog.lane("META", f"đổi {target}")
             sm.apply_modify_target(session, target)
         else:
             # ① NLU (LLM) — mask PII trước khi ra LLM (bước ⑥.1 của masker).
             extra = [session.booking_code] if session.booking_code else None
             masked = pii.mask(user_text, session.vault, extra_values=extra)
+            turnlog.inp(masked)
             session.history.append({"role": "user", "masked_text": masked})
 
             parsed = nlu.extract(masked, self.llm)
@@ -114,7 +149,15 @@ class Orchestrator:
                 return self._reply(session, "REPROMPT", {})
 
             if parsed["intent"] == "handoff":
+                turnlog.lane("META", "xin gặp người thật")
                 return self._handoff(session)
+
+            # GÁC CỬA — lượt này là CÂU HỎI thông tin hay giá trị điền vào tờ đơn? Phải xét
+            # TRƯỚC khối booking_code bên dưới: đặt xong rồi mà khách hỏi "shop ở đâu" thì
+            # intent=book sẽ bị hiểu thành muốn sửa lịch.
+            if self._is_question(parsed, user_text):
+                turnlog.lane("QUERY", parsed["question_type"])
+                return self._answer_query(session, parsed, masked, asked)
 
             # Đã đặt xong mà khách nhắn tiếp: sửa/hủy bằng lời (UC-02/03).
             if session.booking_code:
@@ -127,6 +170,8 @@ class Orchestrator:
                     session.editing = True             # đổi field bằng lời -> vào chế độ sửa
                     session.slots.confirm = None
 
+            turnlog.lane("TASK")
+            before = asdict(session.slots)
             self._capture_contact_from_vault(session)  # phone/email từ vault (Q6 lưới hứng)
             # ② MERGE
             sm.merge_params(session, parsed["entities"])
@@ -146,11 +191,10 @@ class Orchestrator:
                     and bare.isdigit() and len(bare) <= 2:
                 sm.merge_params(session, {"party_size": int(bare)})
 
-            # Đang hỏi ADD-ON mà khách nói "không"/"thôi" -> người này không thêm, sang người
-            # kế (BR-10). Chỉ hiểu được theo ngữ cảnh: cùng chữ "không" ở bước CONFIRM lại
-            # mang nghĩa từ chối đơn.
+            # Đang hỏi ADD-ON mà khách nói "không"/"thôi" -> chốt không thêm gì. Chỉ hiểu
+            # được theo ngữ cảnh: cùng chữ "không" ở bước CONFIRM lại là từ chối cả đơn.
             if asked == S.ADDON and nlu.is_negative(user_text):
-                sm.skip_addon_guest(session)
+                sm.skip_addons(session)
                 # "Không" ở đây nghĩa là KHÔNG THÊM ADD-ON, không phải từ chối cả đơn —
                 # nhưng NLU (stateless) trả confirm='no'. Gỡ ra, nếu không đơn mang sẵn
                 # trạng thái "đã từ chối" tới tận bước CONFIRM.
@@ -158,19 +202,106 @@ class Orchestrator:
                     session.slots.confirm = None
             else:
                 self._capture_choice_text(session, asked, user_text)
+            turnlog.merge(self._slots_diff(before, asdict(session.slots)))
 
         # Nhóm >3 -> handoff (BR-14 / A8), không cần gọi BE.
         if session.slots.party_over:
             return self._handoff(session, reason_party=True)
 
         # ③ STATE MACHINE
+        _prev_state = session.state
         session.state = sm.next_state(session)
+        turnlog.state(_prev_state, session.state)
         # ④ VALIDATE + CALL API (có thể đổi session.state theo A1/A2/lỗi)
+        _state3 = session.state
         api_result = self._run_state_action(session)
+        if session.state != _state3:
+            # Bước ④ tự đẩy tiếp (khớp được tên shop/gói/nhân viên) hoặc lùi lại (A1/A2/lỗi).
+            # Không ghi thì log nhìn mâu thuẫn: ③ báo SHOP mà lượt kết thúc ở DATE.
+            turnlog.state(_state3, session.state)
 
         # ⑤⑥ NLG
         render_key = api_result.get("render_key", session.state)
         return self._reply(session, render_key, api_result)
+
+    # ------------------------------------------------------------------ #
+    #  Làn QUERY — khách HỎI thông tin, không phải điền đơn                #
+    # ------------------------------------------------------------------ #
+    _OFFTOPIC_LIMIT = 3               # lạc đề liên tiếp bấy nhiêu lượt -> mời gọi cửa hàng
+
+    def _is_question(self, parsed: dict, user_text: str) -> bool:
+        """Ưu tiên luồng đặt lịch: đoán nhầm thành "hỏi" chỉ làm bot trả lời thừa, đoán
+        nhầm ngược lại làm hỏng cả phiên đặt. Nghi ngờ -> coi là điền đơn.
+
+        KHÔNG tin một mình question_type của NLU: log thật cho thấy nó gán "other" cho
+        "Sendai" và "course_price" cho "Gói đầu tiên" — toàn là câu khách TRẢ LỜI. Phải có
+        thêm dấu hiệu hỏi trong chính câu nói."""
+        if parsed.get("question_type") not in answers.HANDLED:
+            return False
+        text = (user_text or "").strip()
+        if not nlu.looks_like_question(text):
+            return False
+        # LLM bảo là câu đặt lịch mà vẫn gán loại câu hỏi -> chỉ tin khi có dấu "?" hẳn hoi.
+        if parsed.get("intent") != "ask_info" and "?" not in text:
+            return False
+        return True
+
+    def _answer_query(self, session: Session, parsed: dict, masked: str,
+                      asked: str) -> BotReply:
+        """Trả lời rồi đọc lại câu đang dở. KHÔNG đụng session.state -> lượt sau hội thoại
+        chạy tiếp đúng chỗ, tờ đơn nguyên vẹn."""
+        ent = parsed["entities"]
+        ctx = answers.QueryCtx(
+            question_type=parsed["question_type"],
+            entities=ent,
+            shop_id=session.slots.shop_id,
+            date=session.slots.date,
+            party_size=session.slots.party_size,
+            time_ambiguous=self._time_ambiguous(ent.get("time"), masked),
+            raw_text=masked,
+        )
+        ans = answers.resolve(ctx, self._answer_api)
+
+        if not ans.resolved:
+            session.offtopic_count += 1
+            if session.offtopic_count >= self._OFFTOPIC_LIMIT:
+                return self._handoff(session)
+            return self._reply(session, "OUT_OF_SCOPE",
+                               {"cau_hoi": self._pending_question(session, asked)})
+
+        session.offtopic_count = 0
+        if ans.suggest:
+            sm.merge_params(session, ans.suggest)   # CỬA GHI DUY NHẤT vào tờ đơn
+            # merge_params chỉ ghi shop_text; map sang id ngay bằng đúng đường _match_shop
+            # (danh sách shop vừa được resolver lấy nên đang nằm trong cache) để câu đọc lại
+            # nhảy sang bước kế, không hỏi lại đúng thứ vừa chốt.
+            if session.slots.shop_text:
+                try:
+                    self._match_shop(session, self._get_shops())
+                except ShopApiError:
+                    pass
+            asked = sm.next_state(session)          # điền được ô -> câu đang dở đã khác
+        return self._reply(session, "INFO",
+                           {"noi_dung": ans.text,
+                            "cau_hoi": self._pending_question(session, asked)})
+
+    @staticmethod
+    def _time_ambiguous(time_str: str | None, text: str) -> bool:
+        """"7h" trần là mơ hồ (7h sáng hay 7h tối) -> tủ tra cứu trả lời cả hai."""
+        if not time_str:
+            return False
+        try:
+            if int(str(time_str)[:2]) >= 12:
+                return False
+        except ValueError:
+            return False
+        return not nlu.has_daypart(text)
+
+    @staticmethod
+    def _pending_question(session: Session, asked: str) -> str:
+        if S.is_terminal(session.state):
+            return templates.PENDING_QUESTION_DEFAULT
+        return templates.PENDING_QUESTION.get(asked, templates.PENDING_QUESTION_DEFAULT)
 
     # ------------------------------------------------------------------ #
     #  Bước ④ — hành động theo state                                      #
@@ -231,14 +362,12 @@ class Orchestrator:
                     return self._run_state_action(session)
                 return {"courses": courses}
 
-            if st == S.ADDON:                                     # bước RIÊNG: add-on từng người
-                s.ensure_guest_addons()                           # BR-10: mỗi người 1 danh sách
+            if st == S.ADDON:                                     # bước RIÊNG sau course
                 data = self._get_services(s.shop_id, s.date, s.party_size)
                 self._cache_course(session, data.get("courses", []))
                 addons = data.get("addons", [])
                 if self._match_addons(session, addons):
-                    # Khách đã đọc tên add-on -> gán cho người đang hỏi rồi sang người kế,
-                    # khỏi hỏi lại (không có nút "✅ Xong" để bấm nữa).
+                    # Khách đã đọc tên add-on -> chốt luôn, khỏi hỏi lại.
                     session.state = sm.next_state(session)
                     return self._run_state_action(session)
                 return {"addons": addons}
@@ -246,9 +375,8 @@ class Orchestrator:
             if st == S.SLOT:
                 data = self.api.get_slots(
                     s.shop_id, date=s.date, party_size=s.party_size, course_id=s.course_id,
-                    # GET /slots chỉ nhận MỘT bộ add-on -> gửi HỢP của mọi người (giờ trống ước
-                    # lượng thận trọng); BE re-check add-on RIÊNG từng reservation lúc tạo.
-                    addon_ids=self._union_addons(session), therapist_id=s.therapist_id,
+                    # Cả nhóm dùng chung một bộ add-on nên gửi thẳng (BE vẫn re-check lúc tạo).
+                    addon_ids=list(s.addon_ids), therapist_id=s.therapist_id,
                     therapist_gender=s.therapist_gender,
                 )
                 slots = self._future_slots(data.get("slots", []), s.date)  # bỏ giờ đã qua (hôm nay)
@@ -337,9 +465,10 @@ class Orchestrator:
             session.state = S.CONTACT
             return {}
 
-        s.ensure_guest_addons()                                   # BR-10: add-on RIÊNG từng người
-        reservations = [{"addon_ids": list(s.guest_addons[i])}
-                        for i in range(s.party_size or 1)]
+        # BR-10 (BA cập nhật): cả nhóm CÙNG course và CÙNG add-on -> lặp lại một bộ cho
+        # từng reservation (API vẫn nhận add-on theo từng người, ta gửi giống nhau).
+        reservations = [{"addon_ids": list(s.addon_ids)}
+                        for _ in range(s.party_size or 1)]
         body = {
             "shop_id": s.shop_id,
             "date": s.date,
@@ -373,9 +502,10 @@ class Orchestrator:
             session.state = S.CONFIRM
             return {}
 
-        s.ensure_guest_addons()                                    # BR-10: add-on RIÊNG từng người
-        reservations = [{"addon_ids": list(s.guest_addons[i])}
-                        for i in range(s.party_size or 1)]
+        # BR-10 (BA cập nhật): cả nhóm CÙNG course và CÙNG add-on -> lặp lại một bộ cho
+        # từng reservation (API vẫn nhận add-on theo từng người, ta gửi giống nhau).
+        reservations = [{"addon_ids": list(s.addon_ids)}
+                        for _ in range(s.party_size or 1)]
         body = {
             "date": s.date, "start_time": s.slot, "party_size": s.party_size,
             "course_id": s.course_id, "reservations": reservations,
@@ -495,12 +625,9 @@ class Orchestrator:
         if code == "INVALID_COMBO":                                # A3 — combo course+add-on cấm
             session.state = S.ADDON
             s.addons_decided = False
-            s.addon_guest_idx = 0
             bad = d.get("addon_id")
-            if bad is not None:                                    # gỡ add-on gây cấm khỏi mọi người
-                for guest in s.guest_addons:
-                    if bad in guest:
-                        guest.remove(bad)
+            if bad is not None and bad in s.addon_ids:             # gỡ add-on gây cấm
+                s.addon_ids.remove(bad)
             return {"render_key": "ERROR", "message": e.message}
 
         if code == "ADDON_WITHOUT_COURSE":                         # BR-01 — có add-on mà thiếu course
@@ -624,9 +751,33 @@ class Orchestrator:
         text, s.course_text = s.course_text, None      # tiêu thụ xong, tránh map lại lượt sau
         c = _pick_unique(text, courses)
         if c is None:
+            # NLU hay XÉ số phút khỏi tên gói ("momihogushi 30" -> course='momihogushi' +
+            # duration=30), làm tên còn lại trúng cả 4 mức thời lượng -> mơ hồ -> hỏi lại
+            # đúng thứ khách vừa nói. Thử lại bằng CÂU GỐC, ở đó số phút vẫn còn.
+            c = _pick_unique(Orchestrator._last_user_text(session), courses)
+        if c is None:
             return False
         s.course_id = c["id"]
         return True
+
+    @staticmethod
+    def _slots_diff(before: dict, after: dict) -> list[str]:
+        """Những ô của tờ đơn đã đổi trong lượt — để đọc log biết bước ② thực sự ghi gì."""
+        out = []
+        for k, new in after.items():
+            old = before.get(k)
+            if old != new:
+                out.append(f"{k}: {old!r}→{new!r}")
+        return out
+
+    @staticmethod
+    def _last_user_text(session: Session) -> str:
+        """Câu khách vừa nói (đã mask) — handle_turn nạp vào history ngay trước bước NLU.
+        Dùng làm phương án 2 khi gợi ý NLU không khớp được mục nào."""
+        last = session.history[-1] if session.history else None
+        if last and last.get("role") == "user":
+            return last.get("masked_text") or ""
+        return ""
 
     @staticmethod
     def _capture_choice_text(session: Session, asked: str, user_text: str) -> None:
@@ -651,32 +802,30 @@ class Orchestrator:
 
     @staticmethod
     def _match_addons(session: Session, addons: list[dict]) -> bool:
-        """Map tên add-on khách đọc (addon_texts) -> id, gán cho ĐÚNG người đang hỏi (BR-10)
-        rồi sang người kế. Trả True nếu đã chốt được cho người này.
+        """Map tên add-on khách đọc -> id. Nhận NHIỀU add-on trong MỘT câu ("Ashitsubo với
+        Hot Stone") — trước đây dùng _pick_unique nên câu nêu 2 tên bị coi là mơ hồ rồi bỏ
+        sạch, khiến chat chỉ chọn được 1 trong khi web tick được nhiều.
 
-        Add-on cấm với course đang chọn (BR-09) bị bỏ qua — không mời thì cũng không nhận."""
+        Cả nhóm dùng CHUNG một bộ add-on (BR-10, BA cập nhật). Add-on cấm với course đang
+        chọn (BR-09) bị loại — không mời thì cũng không nhận."""
         s = session.slots
         if not s.addon_texts:
             return False
-        wanted = [t.strip().lower() for t in s.addon_texts if t and t.strip()]
-        s.addon_texts = []                    # tiêu thụ xong, tránh gán lại cho người kế
-        if not wanted:
+        # NLU trả danh sách tên, còn nhánh không-LLM đưa nguyên câu vào một phần tử -> nối
+        # hết lại rồi quét một lượt, xử lý được cả hai dạng.
+        query = " ".join(t.strip() for t in s.addon_texts if t and t.strip()).lower()
+        s.addon_texts = []                    # tiêu thụ xong, tránh gán lại ở lượt sau
+        if not query:
             return False
 
         allowed = [a for a in addons
                    if not (s.course_id and s.course_id in (a.get("restricted_course_ids") or []))]
-        picked: list[int] = []
-        for t in wanted:
-            hit = _pick_unique(t, allowed)    # mơ hồ (1 tên trúng ≥2 add-on) -> bỏ, hỏi lại
-            if hit is not None and hit["id"] not in picked:
-                picked.append(hit["id"])
+        picked = [a["id"] for a in matching.pick_all(query, allowed)]
         if not picked:                        # đọc tên không khớp add-on nào -> hỏi lại
             return False
 
-        s.ensure_guest_addons()
-        idx = min(s.addon_guest_idx, len(s.guest_addons) - 1)
-        s.guest_addons[idx] = picked
-        sm.advance_addon_guest(s)
+        s.addon_ids = picked
+        s.addons_decided = True
         return True
 
     @staticmethod
@@ -733,16 +882,6 @@ class Orchestrator:
         return out
 
     @staticmethod
-    def _union_addons(session: Session) -> list[int]:
-        """Hợp add-on của mọi người — gửi cho GET /slots (chỉ nhận 1 bộ). Giữ thứ tự, bỏ trùng."""
-        seen: list[int] = []
-        for guest in session.slots.guest_addons:
-            for a in guest:
-                if a not in seen:
-                    seen.append(a)
-        return seen
-
-    @staticmethod
     def _cache_course(session: Session, courses: list[dict]) -> None:
         """Lưu tên + thời lượng course đã chọn để đọc lại ở CONFIRM (không cần gọi API lần nữa)."""
         cid = session.slots.course_id
@@ -793,6 +932,19 @@ class Orchestrator:
             return hit[1]
         data = self.api.get_services(shop_id, date, party_size)
         self._services_cache[key] = (now, data)
+        return data
+
+    _TIMELINE_TTL = 60
+
+    def _get_timeline(self, shop_id: int, date: str) -> dict:
+        """GET /timeline có cache ngắn theo (shop, ngày) — xem _timeline_cache."""
+        key = (shop_id, date)
+        now = time.time()
+        hit = self._timeline_cache.get(key)
+        if hit and now - hit[0] < self._TIMELINE_TTL:
+            return hit[1]
+        data = self.api.get_timeline(shop_id, date)
+        self._timeline_cache[key] = (now, data)
         return data
 
     def _get_shops(self) -> list[dict]:

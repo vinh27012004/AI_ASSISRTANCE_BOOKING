@@ -55,8 +55,10 @@ class RealLLMClient:
 
         # system/user đã được mask PII từ trước khi tới đây (app/pii.py) nên log nguyên văn
         # an toàn. KHÔNG log api_key/header Authorization — đó là secret gọi router.
-        logger.info("llm -> [%s] model=%s temperature=%s max_tokens=%s system=%s user=%s",
-                    call_id, self.model, temperature, max_tokens, system, user)
+        # DEBUG chứ không INFO: system prompt ~2000 ký tự, in mỗi lời gọi thì log không đọc
+        # nổi. Tóm tắt lượt nằm ở app/turnlog.py; cần soi prompt thì LOG_LEVEL=DEBUG.
+        logger.debug("llm -> [%s] model=%s temperature=%s max_tokens=%s system=%s user=%s",
+                     call_id, self.model, temperature, max_tokens, system, user)
 
         req = urllib.request.Request(
             f"{self.base_url}/chat/completions",
@@ -85,7 +87,7 @@ class RealLLMClient:
             logger.error("llm <- [%s] lỗi kết nối: %s", call_id, e)
             raise LLMError(str(e)) from e
 
-        logger.info("llm <- [%s] raw=%s", call_id, raw)
+        logger.debug("llm <- [%s] raw=%s", call_id, raw)
         try:
             return _extract_content(raw)
         except LLMError as e:

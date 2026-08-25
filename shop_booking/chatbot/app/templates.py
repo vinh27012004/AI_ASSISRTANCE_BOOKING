@@ -10,6 +10,24 @@ câu, vì khách chỉ có thể trả lời bằng lời (chat gõ tay hoặc g
 
 from __future__ import annotations
 
+from app import states as S
+
+# Câu hỏi ĐANG DỞ, đọc lại sau khi trả lời một câu hỏi ngoài luồng để hội thoại không bị
+# cụt. Cố ý NGẮN, không đọc lại danh sách (shop/giờ/gói): khách vừa thấy ở lượt trước, và
+# đọc lại sẽ phải gọi API lần thứ hai trong cùng một lượt.
+PENDING_QUESTION = {
+    S.SHOP: "Quay lại ạ, anh/chị muốn đặt ở cửa hàng nào ạ?",
+    S.DATE: "Quay lại ạ, anh/chị muốn đặt ngày nào ạ?",
+    S.PARTY_SIZE: "Quay lại ạ, anh/chị đặt cho mấy người ạ?",
+    S.COURSE: "Quay lại ạ, anh/chị chọn gói dịch vụ nào ạ?",
+    S.ADDON: "Quay lại ạ, anh/chị có thêm dịch vụ bổ sung nào không ạ?",
+    S.THERAPIST: "Quay lại ạ, anh/chị có muốn chỉ định nhân viên không ạ?",
+    S.SLOT: "Quay lại ạ, anh/chị chọn khung giờ nào ạ?",
+    S.CONTACT: "Quay lại ạ, anh/chị cho em xin số điện thoại và email nhé.",
+    S.CONFIRM: "Quay lại ạ, anh/chị xác nhận đặt lịch nhé?",
+}
+PENDING_QUESTION_DEFAULT = "Anh/chị cần em hỗ trợ gì thêm không ạ?"
+
 # Chỉ dẫn cho LLM (bước ⑤).
 INSTRUCTION = {
     "GREETING": "Chào khách, giới thiệu là trợ lý AI đặt lịch massage, hỏi khách cần gì.",
@@ -17,7 +35,7 @@ INSTRUCTION = {
     "DATE": "Hỏi khách muốn đặt ngày nào, nêu vài ngày cửa hàng còn làm trong facts.",
     "PARTY_SIZE": "Hỏi đặt cho mấy người, nhắc tối đa 3 người mỗi lượt.",
     "COURSE": "Hỏi khách chọn gói dịch vụ chính, ĐỌC RÕ danh sách gói trong facts (mỗi gói đã kèm sẵn thời lượng).",
-    "ADDON": "(Render TẤT ĐỊNH — soạn ở nlg._addon_prompt_line, không qua LLM.) Hỏi add-on RIÊNG từng người (BR-10), đọc rõ danh sách add-on và cho phép khách nói 'không' để bỏ qua.",
+    "ADDON": "(Render TẤT ĐỊNH — soạn ở nlg._addon_prompt_line, không qua LLM.) Hỏi add-on MỘT lần cho cả nhóm (BR-10), đọc rõ danh sách, cho chọn NHIỀU, và cho khách nói 'không' để bỏ qua.",
     "SLOT": "Mời khách chọn khung giờ, ĐỌC RÕ các giờ còn trống trong facts; khách nói giờ mong muốn là được.",
     "THERAPIST": "Hỏi khách có muốn chỉ định nhân viên (nêu tên nhân viên đang trực trong facts, hoặc theo giới tính) hay để cửa hàng sắp.",
     "CONTACT": "Xin thông tin liên hệ CÒN THIẾU (đúng theo facts.hoi) để giữ chỗ và gửi mã đặt chỗ. Nếu khách đã cho số điện thoại rồi thì CHỈ hỏi email, đừng hỏi lại số.",
@@ -30,6 +48,8 @@ INSTRUCTION = {
     "HANDOFF": "Xin lỗi vì chưa hỗ trợ được, mời khách gọi cửa hàng.",
     "REPROMPT": "Nói chưa hiểu rõ, xin khách nói lại ngắn gọn.",
     "ERROR": "Truyền đạt thông báo lỗi từ hệ thống một cách lịch sự, gợi ý bước tiếp theo.",
+    "INFO": "(Render TẤT ĐỊNH — câu chứa giờ/địa chỉ/giá THẬT, không qua LLM.)",
+    "OUT_OF_SCOPE": "(Render TẤT ĐỊNH.)",
 }
 
 # Câu mẫu offline. {…} là chỗ điền facts.
@@ -57,6 +77,9 @@ FAKE = {
     "HANDOFF": "{message}Anh/chị vui lòng gọi để được hỗ trợ nhé: {shop_phone}.",
     "REPROMPT": "Dạ em chưa rõ ý anh/chị. Anh/chị nói lại ngắn gọn giúp em nhé.",
     "ERROR": "{message}",
+    # Trả lời câu hỏi ngoài luồng rồi đọc lại câu đang dở (tờ đơn KHÔNG đổi).
+    "INFO": "{noi_dung} {cau_hoi}",
+    "OUT_OF_SCOPE": "Dạ phần này em chưa hỗ trợ được ạ, em chỉ giúp đặt lịch thôi. {cau_hoi}",
 }
 
 

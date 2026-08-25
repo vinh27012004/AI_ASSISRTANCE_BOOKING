@@ -12,15 +12,21 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from datetime import date, timedelta
 
+from app import turnlog
 from app.llm_client import LLMError, RealLLMClient
 
 logger = logging.getLogger(__name__)
 
 INTENTS = {"book", "modify", "cancel", "ask_info", "chitchat", "handoff"}
 _ENTITY_KEYS = ("shop", "date", "time", "party_size", "duration", "course", "addons",
-                "therapist", "confirm")
+                "therapist", "confirm", "location")
+
+# Loại câu hỏi thông tin (không phải điền đơn) — khớp key trong app/answers/RESOLVERS.
+QUESTION_TYPES = {"shops_open_at", "shop_contact", "shop_days_off", "course_price",
+                  "shops_near", "other"}
 
 _NLU_SYSTEM = (
     "Bạn là bộ trích xuất tham số cho hệ thống đặt lịch massage. CHỈ trích xuất, TUYỆT ĐỐI "
@@ -28,7 +34,16 @@ _NLU_SYSTEM = (
     '{"intent":"book|modify|cancel|ask_info|chitchat|handoff",'
     '"entities":{"shop":"text|null","date":"YYYY-MM-DD|null","time":"HH:MM|null",'
     '"party_size":"1|null","duration":"60|null","course":"text|null","addons":[],'
-    '"therapist":"name|male|female|none|null","confirm":"yes|no|null"}}\n'
+    '"therapist":"name|male|female|none|null","confirm":"yes|no|null",'
+    '"location":"text|null"},'
+    '"question_type":"shops_open_at|shop_contact|shop_days_off|course_price|shops_near|other|null"}\n'
+    "question_type CHỈ điền khi khách ĐANG HỎI thông tin về cửa hàng (giờ mở cửa, địa chỉ, "
+    "số điện thoại, ngày nghỉ, giá dịch vụ, cửa hàng gần khu vực nào); khách đang TRẢ LỜI "
+    "câu hỏi của trợ lý thì để null. location là khu vực/địa chỉ CỦA KHÁCH (nhà/chỗ khách "
+    "đang đứng), KHÔNG phải tên cửa hàng.\n"
+    "course là TÊN GÓI ĐÚNG NHƯ KHÁCH NÓI, GIỮ NGUYÊN cả số phút trong tên "
+    "(vd 'momihogushi 30' -> course='momihogushi 30', TUYỆT ĐỐI không tách 30 sang duration) "
+    "— tên thiếu số phút sẽ trùng nhiều gói và hệ thống không chọn được.\nn"
     "QUAN TRỌNG: date PHẢI là ngày tuyệt đối YYYY-MM-DD. Khách nói tương đối (hôm nay/mai/"
     "ngày kia/thứ Hai tuần sau) thì tự quy đổi dựa trên 'Hôm nay' được cung cấp; time là 24h "
     "HH:MM. shop LÀ TÊN/ĐỊA ĐIỂM cửa hàng khách nêu (vd 'Sendai', 'Tokyo', 'chi nhánh Osaka') — "
@@ -43,6 +58,7 @@ _NLU_SYSTEM = (
 
 def extract(masked_text: str, llm: RealLLMClient | None) -> dict | None:
     """Trả {'intent', 'entities'} đã validate, hoặc None nếu không trích được (hỏi lại)."""
+    _t0 = time.perf_counter()
     if llm is None:
         parsed = _rule_based(masked_text)
         source = "rule_based (chưa cấu hình LLM)"
@@ -69,9 +85,14 @@ def extract(masked_text: str, llm: RealLLMClient | None) -> dict | None:
     if parsed is None:
         logger.warning("nlu: không trích được gì từ %r -> hỏi lại", masked_text)
         return None
+    if not parsed.get("question_type"):
+        # Router hay bỏ field mới. Nó vẫn gán intent=ask_info đúng, nên suy LOẠI câu hỏi
+        # bằng luật — thiếu cái này thì câu hỏi rơi tuột về luồng đặt lịch (bug đã gặp).
+        parsed["question_type"] = _detect_question(masked_text.lower())
     parsed["entities"] = _normalize_entities(parsed["entities"])  # date tương đối -> ISO
-    logger.info("nlu: text=%r source=%s -> intent=%s entities=%s",
-                masked_text, source, parsed["intent"], parsed["entities"])
+    turnlog.nlu(source, time.perf_counter() - _t0, parsed["intent"],
+                parsed["question_type"], parsed["entities"])
+    logger.debug("nlu: text=%r source=%s -> %s", masked_text, source, parsed)
     return parsed
 
 
@@ -91,7 +112,10 @@ def validate_schema(obj) -> dict | None:
         if v in ("null", "", "none") and k != "therapist":
             v = None
         entities[k] = v if k != "addons" else (v or [])
-    return {"intent": intent, "entities": entities}
+    qt = obj.get("question_type")
+    if qt not in QUESTION_TYPES:            # thiếu/lạ -> coi như không phải câu hỏi
+        qt = None
+    return {"intent": intent, "entities": entities, "question_type": qt}
 
 
 def _normalize_entities(entities: dict) -> dict:
@@ -277,6 +301,57 @@ def _parse_json(raw: str):
         return None
 
 
+# Buổi trong ngày. _EVENING_WORDS dùng để suy "7h tối" = 19:00; cả hai bộ dùng cho
+# has_daypart() — biết khách CÓ nêu buổi hay không.
+_EVENING_WORDS = ("tối", "toi", "chiều", "chieu", "đêm", "dem")
+_MORNING_WORDS = ("sáng", "sang", "trưa", "trua")
+
+
+def has_daypart(text: str) -> bool:
+    """Câu có nêu BUỔI không. Dùng ở tủ tra cứu: '7h' trần là mơ hồ (7h sáng hay 7h tối)
+    nên phải trả lời cả hai; '7h tối' thì không."""
+    low = (text or "").lower()
+    return any(re.search(rf"\b{w}\b", low) for w in _EVENING_WORDS + _MORNING_WORDS)
+
+
+# Nhận diện CÂU HỎI thông tin ở nhánh rule-based (chạy khi chưa cấu hình LLM hoặc router
+# hỏng). Cụm từ cố ý mang dạng CÂU HỎI ("có làm không") chứ không phải từ trần ("chủ nhật")
+# — "đặt chủ nhật này" là điền đơn, không phải hỏi. Thứ tự xét có ý nghĩa: câu hỏi vị trí
+# thường chứa luôn "ở đâu" nên shops_near phải đứng trước shop_contact.
+_ASK_RULES = (
+    ("shops_near",    ("gần đây", "gần nhất", "gần nhà", "gần chỗ", "quanh đây",
+                       "nhà tôi ở", "tôi ở")),
+    # Cụm phải gắn với ĐỒNG HỒ ("mở lúc"), đừng thêm "có mở" trần — "chủ nhật có mở không"
+    # là hỏi ngày nghỉ, mà shops_open_at lại xét trước shop_days_off.
+    ("shops_open_at", ("còn mở", "mở cửa", "đóng cửa", "còn làm", "mở lúc", "mở vào",
+                       "nào mở", "mở tới", "mở đến", "làm tới", "làm đến", "mấy giờ")),
+    ("shop_days_off", ("có làm không", "có mở không", "có nghỉ không", "ngày nghỉ",
+                       "nghỉ ngày nào", "nghỉ hôm nào")),
+    ("course_price",  ("bao nhiêu tiền", "giá bao nhiêu", "giá thế nào", "giá là",
+                       "mất bao nhiêu", "phí")),
+    ("shop_contact",  ("ở đâu", "địa chỉ", "số điện thoại", "sđt", "số liên hệ")),
+)
+
+
+# Từ để hỏi. Khách TRẢ LỜI câu bot hỏi ("Sendai", "Gói đầu tiên", "momihogushi 30") gần như
+# không bao giờ chứa mấy từ này, còn câu hỏi thật thì hầu như luôn có (kể cả khi quên "?":
+# "Cửa hàng nào mở lúc 7h tối nay.").
+_QUESTION_WORDS = ("nào", "đâu", "bao nhiêu", "mấy giờ", "mấy tiếng", "khi nào", "thế nào",
+                   "ra sao", "có phải", "được không", "cho hỏi", "cho em hỏi")
+
+
+def looks_like_question(text: str) -> bool:
+    low = (text or "").strip().lower()
+    return "?" in low or any(w in low for w in _QUESTION_WORDS)
+
+
+def _detect_question(low: str) -> str | None:
+    for qt, words in _ASK_RULES:
+        if any(w in low for w in words):
+            return qt
+    return None
+
+
 _HANDOFF_WORDS = ("nhân viên", "người thật", "gặp người", "gọi cửa hàng", "tổng đài")
 # "cancel"/"ok"/"oke" giữ lại: từ mượn khách Việt vẫn hay gõ.
 _CANCEL_WORDS = ("hủy", "huỷ", "cancel")
@@ -288,9 +363,13 @@ _NO_WORDS = ("không phải", "sai rồi", "chưa đúng")
 def _rule_based(text: str) -> dict:
     """Trích param offline khi chưa cấu hình router. Phủ luồng chính; không thay LLM thật."""
     low = text.lower()
+    question_type = _detect_question(low)
     intent = "book"
     if any(w in low for w in _HANDOFF_WORDS):
         intent = "handoff"
+        question_type = None
+    elif question_type:
+        intent = "ask_info"
     elif any(w in low for w in _CANCEL_WORDS):
         intent = "cancel"
     elif any(w in low for w in _MODIFY_WORDS):
@@ -309,7 +388,7 @@ def _rule_based(text: str) -> dict:
         hh = int(m.group(1))
         mm = int(m.group(2)) if m.group(2) else 0
         # "7h tối" = 19:00 chứ không phải 07:00 — buổi nói sau giờ nên regex trên không thấy.
-        if hh < 12 and re.search(r"(tối|toi|chiều|chieu|đêm|dem)", low):
+        if hh < 12 and any(re.search(rf"\b{w}\b", low) for w in _EVENING_WORDS):
             hh += 12
         if 0 <= hh <= 23 and 0 <= mm <= 59:
             entities["time"] = f"{hh:02d}:{mm:02d}"
@@ -338,4 +417,4 @@ def _rule_based(text: str) -> dict:
     elif any(w in low for w in _YES_WORDS):
         entities["confirm"] = "yes"
 
-    return {"intent": intent, "entities": entities}
+    return {"intent": intent, "entities": entities, "question_type": question_type}

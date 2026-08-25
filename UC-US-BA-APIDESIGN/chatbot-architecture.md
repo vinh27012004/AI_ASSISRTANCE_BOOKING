@@ -112,7 +112,7 @@ flowchart TB
 
 Mỗi state khai báo 4 thứ: **slot cần có để rời state**, **điều kiện vào**, **API gọi khi vào**, **template prompt cho NLG**.
 
-> **Cập nhật khi triển khai** (khác bản thiết kế đầu, để khớp code): (1) **bỏ `DURATION`** — mỗi course đã kèm sẵn thời lượng; (2) tách `SERVICE` thành **`COURSE` + `ADDON`** riêng, add-on chọn **RIÊNG từng người** cho nhóm (BR-10); (3) **`THERAPIST` đặt TRƯỚC `SLOT`** — chỉ định người trước để `GET /slots` lọc đúng giờ người đó rảnh (nhóm ≥2 bỏ qua THERAPIST); (4) thêm state sửa/hủy trong phiên `UPDATE`/`CANCELLED`/`MODIFY`.
+> **Cập nhật khi triển khai** (khác bản thiết kế đầu, để khớp code): (1) **bỏ `DURATION`** — mỗi course đã kèm sẵn thời lượng; (2) tách `SERVICE` thành **`COURSE` + `ADDON`** riêng; cả nhóm dùng **CHUNG** course và add-on (BR-10 — BA cập nhật, trước đây add-on riêng từng người), một câu nêu nhiều add-on nhận hết; (3) **`THERAPIST` đặt TRƯỚC `SLOT`** — chỉ định người trước để `GET /slots` lọc đúng giờ người đó rảnh (nhóm ≥2 bỏ qua THERAPIST); (4) thêm state sửa/hủy trong phiên `UPDATE`/`CANCELLED`/`MODIFY`.
 
 | State | Slot phải có để qua state sau | Điều kiện vào | API gọi (bước ④) | Prompt NLG (bước ⑤) |
 |---|---|---|---|---|
@@ -121,7 +121,7 @@ Mỗi state khai báo 4 thứ: **slot cần có để rời state**, **điều k
 | `DATE` | `date` | có `shop_id` | — | hỏi ngày |
 | `PARTY_SIZE` | `party_size` (1–3) | có `date` | — | hỏi số người; >3 → nhánh handoff (BR-14) |
 | `COURSE` | `course_id` | có `party_size` | `GET /shops/{id}/services?date=` | hỏi course chính (nhãn kèm sẵn thời lượng) |
-| `ADDON` | `addons_decided` | có `course_id` | `GET /shops/{id}/services?date=` | hỏi add-on **RIÊNG từng người** (BR-10); ẩn add-on cấm (BR-09) |
+| `ADDON` | `addons_decided` | có `course_id` | `GET /shops/{id}/services?date=` | hỏi add-on **MỘT lần, dùng chung cả nhóm** (BR-10); nhận nhiều add-on trong một câu; ẩn add-on cấm (BR-09) |
 | `THERAPIST` | `therapist` hoặc "bỏ qua" | **chỉ khi `party_size==1`** (BR-04) | `GET /therapists?date=` | hỏi có chỉ định không (map **tên→id**) |
 | `SLOT` | `slot` | đã chọn/bỏ therapist | `GET /slots?…&therapist_id=` | đọc giờ trống (lọc theo người đã chọn; bỏ giờ đã qua nếu là hôm nay) |
 | `CONTACT` | `phone`, `email` (đã lookup) | có `slot` | `POST /customers/lookup` (chặn NG — BR-06) | hỏi **phần còn thiếu** (SĐT/email) |
@@ -194,7 +194,7 @@ Code validate JSON này trước khi merge (sai schema → coi như không tríc
 |---|---|---|
 | vào `SHOP` | `GET /shops` | render nút chọn |
 | vào `COURSE` | `GET /shops/{id}/services?date=` | chọn course chính |
-| vào `ADDON` | `GET /shops/{id}/services?date=` | `restricted_course_ids` để ẩn combo cấm sớm (BR-09); add-on **riêng từng người** (BR-10) |
+| vào `ADDON` | `GET /shops/{id}/services?date=` | `restricted_course_ids` để ẩn combo cấm sớm (BR-09); add-on **dùng chung cả nhóm** (BR-10) |
 | vào `THERAPIST` | `GET /shops/{id}/therapists?date=` | chỉ khi `party_size==1` (BR-04); **trước** SLOT |
 | vào `SLOT` | `GET /shops/{id}/slots?…&therapist_id=&addon_ids=` | lọc theo người đã chỉ định + **hợp** add-on cả nhóm; bỏ giờ đã qua nếu hôm nay |
 | vào `CONTACT` | `POST /customers/lookup` | phát hiện NG list (BR-06) |
