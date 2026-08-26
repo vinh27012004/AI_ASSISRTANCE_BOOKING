@@ -1394,7 +1394,7 @@ def test_shop_with_no_shifts_routes_back_to_shop():
 
 
 # --------------------------------------------------------------------------- #
-#  FAQ / retrieval (hybrid BM25 + vector, RRF) — app/retrieval.py              #
+#  FAQ / retrieval (BM25 thuần) — app/retrieval.py                             #
 # --------------------------------------------------------------------------- #
 _FAQ_CORPUS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                            "data", "faq.md")
@@ -1409,7 +1409,6 @@ def _settings_faq(**kw):
         redis_url="", session_ttl_seconds=1800, vault_enc_key="",
         fallback_shop_phone="", support_phone="",
         faq_corpus_path=_FAQ_CORPUS,
-        faq_vector_cache_path="",      # không ghi cache khi test
     )
     base.update(kw)
     return Settings(**base)
@@ -1429,7 +1428,7 @@ def test_faq_tokenize_keeps_compound_words():
 
 
 def test_faq_bm25_prefers_exact_rare_term():
-    """Chỗ BM25 gánh phần embedding hay trượt: thuật ngữ hiếm khớp nguyên văn."""
+    """Thế mạnh của BM25: thuật ngữ hiếm khớp nguyên văn."""
     chunks = retrieval.load_corpus(_FAQ_CORPUS)
     check(len(chunks) >= 10, f"corpus phải có nhiều mục, đang {len(chunks)}")
     idx = retrieval.BM25Index(chunks)
@@ -1437,14 +1436,6 @@ def test_faq_bm25_prefers_exact_rare_term():
     check(hits, "phải có kết quả")
     check("add-on" in chunks[hits[0][0]].title.lower(),
           f"mục đầu phải về add-on, đang {chunks[hits[0][0]].title!r}")
-
-
-def test_faq_rrf_fuse_rewards_agreement():
-    """RRF: tài liệu được CẢ HAI nhánh xếp cao phải thắng tài liệu chỉ MỘT nhánh xếp nhất.
-    Đây là lý do chọn RRF thay vì cộng điểm — không phải chuẩn hóa thang nào cả."""
-    fused = dict(retrieval.rrf_fuse([[7, 3], [9, 3]]))
-    check(fused[3] > fused[7], "3 đứng hạng 2 ở CẢ HAI nhánh -> phải trên 7 (hạng 1, một nhánh)")
-    check(fused[7] == fused[9], "7 và 9 đều hạng 1 ở đúng một nhánh -> bằng điểm")
 
 
 def test_faq_answers_policy_question():
@@ -1488,8 +1479,9 @@ def test_faq_does_not_touch_the_form():
 
 
 def test_faq_query_is_masked_before_retrieval():
-    """Bật nhánh vector là câu truy vấn bay sang nhà cung cấp embedding. PII phải đã
-    thành placeholder TRƯỚC khi tới retriever."""
+    """Retrieval chạy nội bộ nên PII không bay đi đâu, NHƯNG câu truy vấn vẫn phải được
+    mask trước khi tới retriever: SĐT lọt vào token là nó tham gia chấm điểm BM25, và đây
+    là chốt giữ nguyên nếu sau này cắm một reranker gọi ra ngoài."""
     seen = []
 
     class _SpyRetriever:

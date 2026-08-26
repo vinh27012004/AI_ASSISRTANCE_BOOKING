@@ -12,10 +12,11 @@ Ba quyết định đáng chú ý:
    "bỏ qua hướng dẫn trước" cũng vô hại). Giá phải trả là câu trả lời cứng theo văn bản
    soạn sẵn — chấp nhận được, vì `INFO` vốn đã nằm trong `_LITERAL_SAFE_KEYS` của nlg.py.
 
-2. **Truy vấn dùng text ĐÃ MASK** (`ctx.raw_text`, xem docstring của `QueryCtx`). Bật
-   nhánh vector là câu truy vấn bay sang nhà cung cấp embedding — PII phải được thay bằng
-   placeholder TRƯỚC đó. Placeholder không ảnh hưởng chất lượng tìm kiếm vì câu hỏi chính
-   sách gần như không chứa số điện thoại/email.
+2. **Truy vấn dùng text ĐÃ MASK** (`ctx.raw_text`, xem docstring của `QueryCtx`). Retrieval
+   chạy nội bộ nên hiện không có gì bay ra ngoài, nhưng vẫn mask: SĐT lọt vào token là nó
+   tham gia chấm điểm BM25, và chốt này phải còn nguyên nếu sau này cắm thêm một nhánh gọi
+   ra ngoài. Placeholder không ảnh hưởng chất lượng tìm kiếm vì câu hỏi chính sách gần như
+   không chứa số điện thoại/email.
 
 3. **Lưới hứng cuối, không phải resolver ngang hàng.** `resolve()` gọi nó khi mọi resolver
    khác đã chê — nhờ vậy thêm câu hỏi mới chỉ cần sửa `data/faq.md`, không phải dạy thêm
@@ -59,7 +60,7 @@ def answer(ctx: QueryCtx, api) -> Answer:
         return NOT_RESOLVED
 
     chunk, score = hits[0]
-    logger.info("faq: %r -> %r (rrf=%.4f)", query, chunk.title, score)
+    logger.info("faq: %r -> %r (bm25=%.2f)", query, chunk.title, score)
     # KHÔNG trả `suggest`: mục FAQ là văn bản tĩnh, không biết gì về phiên hiện tại nên
     # không có quyền điền vào tờ đơn. Tra cứu thuần.
     return Answer(text=chunk.answer_text)

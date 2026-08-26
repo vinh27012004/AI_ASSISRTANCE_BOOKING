@@ -58,7 +58,7 @@ def create_app() -> Flask:
             "session": "redis" if settings.use_redis else "memory",
             "faq": {
                 "chunks": len(retriever.chunks) if retriever else 0,
-                "retrieval": "hybrid" if (retriever and retriever.vectors) else "bm25",
+                "retrieval": "bm25",
             },
         })
 

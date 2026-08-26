@@ -92,9 +92,9 @@ class Orchestrator:
         # làn QUERY dùng: một câu "cửa hàng nào nhận lúc 19h?" dò cả n cửa hàng.
         self._slots_cache: dict[tuple, tuple[float, dict]] = {}
         self._answer_api = _AnswerApi(self)
-        # Nạp corpus FAQ MỘT LẦN lúc khởi tạo (đọc file + dựng chỉ mục BM25 + embed corpus
-        # nếu bật hybrid). Đây là chỗ duy nhất cầm Settings nên cũng là chỗ duy nhất dựng
-        # được retriever. Corpus rỗng -> answers.faq tự tắt, luồng còn lại không đổi.
+        # Nạp corpus FAQ MỘT LẦN lúc khởi tạo (đọc file + dựng chỉ mục BM25). Đây là chỗ
+        # duy nhất cầm Settings nên cũng là chỗ duy nhất dựng được retriever. Corpus rỗng
+        # -> answers.faq tự tắt, luồng còn lại không đổi.
         self._faq_retriever = retrieval.build_retriever(settings)
         faq.configure(self._faq_retriever)
 

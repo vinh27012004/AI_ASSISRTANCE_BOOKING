@@ -23,16 +23,14 @@ Kiểm tra nhanh sau khi sửa file này:
 python tests/check_faq.py          # bảng câu hỏi mẫu -> mục nào được chọn
 python tests/test_chatbot.py       # bộ test đầy đủ
 ```
-## Chào
-> Chào bạn
-
-Dạ em chào anh/chị ạ  
 ## Hủy lịch thì làm thế nào, có mất phí không
 > hủy lịch
 > hủy đặt chỗ
 > hủy booking
 > bỏ lịch đã đặt
 > không đi nữa
+> bận đột xuất không tới được
+> mất tiền cọc không nếu bỏ
 
 Dạ anh/chị hủy được ạ, miễn là hủy trước giờ hẹn ít nhất 1 tiếng. Anh/chị nhắn em "hủy
 lịch" là em xử lý luôn, hoặc vào trang quản lý đặt chỗ trên web với email và mã đặt chỗ ạ.
@@ -46,6 +44,7 @@ lịch" là em xử lý luôn, hoặc vào trang quản lý đặt chỗ trên w
 > đổi ngày giờ
 > chuyển lịch sang hôm khác
 > sửa lịch đã đặt
+> kẹt lịch dời qua bữa khác
 
 Dạ anh/chị đổi được ngày giờ, dịch vụ và số người, miễn là đổi trước giờ hẹn ít nhất 1
 tiếng ạ. Anh/chị nhắn em "đổi lịch" là em mở giúp, hoặc sửa trên trang quản lý đặt chỗ.
@@ -127,6 +126,7 @@ trước, rồi em mời thêm add-on sau ạ.
 > add on bị mờ
 > không chọn được add on
 > add on không hiện
+> cái kia bị mờ chọn không được
 
 Dạ một số add-on không kết hợp được với gói chính đang chọn nên em ẩn bớt ạ. Anh/chị đổi
 gói chính khác thì danh sách add-on cũng đổi theo ạ.
@@ -135,6 +135,8 @@ gói chính khác thì danh sách add-on cũng đổi theo ạ.
 > mã đặt chỗ
 > booking code
 > mã xác nhận gửi ở đâu
+> xem lại lịch đã đặt ở đâu
+> tra cứu đơn đã đặt
 
 Dạ đặt xong hệ thống gửi mã đặt chỗ về email anh/chị đăng ký ạ. Mã đó cùng với email dùng
 để tra cứu, sửa hoặc hủy lịch trên trang quản lý đặt chỗ ạ.
@@ -179,6 +181,7 @@ ghé cho anh/chị ạ.
 > đặt gấp
 > đặt sát giờ
 > cần đặt trước bao lâu
+> chiều nay ghé liền
 
 Dạ anh/chị đặt trong ngày vẫn được, miễn là còn khung giờ trống ạ. Em hiện giờ theo lịch
 thực tế của nhân viên nên giờ nào hiện ra là giờ đó đặt được ạ.

@@ -66,8 +66,7 @@ MUST_REJECT = [
 
 def main() -> int:
     r = retrieval.build_retriever(load_settings())
-    print(f"corpus: {len(r.chunks)} mục · nhánh vector: "
-          f"{'bật' if r.embedder and r.vectors else 'tắt (BM25-only)'}\n")
+    print(f"corpus: {len(r.chunks)} mục · retrieval: BM25 thuần\n")
 
     if len(sys.argv) > 1:
         q = " ".join(sys.argv[1:])

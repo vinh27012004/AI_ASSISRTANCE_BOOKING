@@ -50,8 +50,7 @@ class Settings:
     # shop_api được log ở đây để soi dữ liệu sai (BE trả sai hay chatbot xử lý sai).
     log_level: str = "INFO"
     # --- FAQ / retrieval (app/retrieval.py). Corpus rỗng -> làn FAQ tắt hẳn, phần còn
-    # lại chạy y như cũ. Embedding rỗng -> BM25-only, vẫn dùng được và vẫn test offline
-    # được (cùng nguyên tắc use_real_llm / use_redis ở dưới).
+    # lại chạy y như cũ. Retrieval là BM25 thuần, không cấu hình gì thêm.
     # --- Hạn chờ LLM, tách theo chỗ gọi. Trước đây dùng chung 20s cho cả hai: NLU chặn
     # cả lượt chat nên khách phải ngồi đợi trọn 20 giây rồi mới nhận được câu rule-based.
     # NLU đo thật 2,2–4,4s (log 26/8) -> 8s là gấp đôi đầu, mà xấu nhất giảm 2,5 lần.
@@ -59,10 +58,6 @@ class Settings:
     llm_timeout_nlu: float = 8.0
     llm_timeout_nlg: float = 6.0
     faq_corpus_path: str = ""
-    faq_vector_cache_path: str = ""
-    embedding_base_url: str = ""
-    embedding_api_key: str = ""
-    embedding_model: str = ""
 
     @property
     def use_real_llm(self) -> bool:
@@ -72,12 +67,6 @@ class Settings:
     @property
     def use_redis(self) -> bool:
         return bool(self.redis_url)
-
-    @property
-    def use_embeddings(self) -> bool:
-        # Thiếu bất kỳ mảnh nào -> hybrid tắt, retrieval lùi về BM25 thuần stdlib.
-        return bool(self.embedding_base_url and self.embedding_api_key
-                    and self.embedding_model)
 
 
 def load_settings() -> Settings:
@@ -100,9 +89,4 @@ def load_settings() -> Settings:
         # Mặc định trỏ vào data/faq.md cạnh service -> cài xong là FAQ chạy luôn, không
         # phải khai báo gì. Đặt FAQ_CORPUS_PATH= (rỗng) để tắt.
         faq_corpus_path=os.environ.get("FAQ_CORPUS_PATH", _default_faq_path()),
-        faq_vector_cache_path=os.environ.get(
-            "FAQ_VECTOR_CACHE_PATH", os.path.join(_data_dir(), "faq_vectors.json")),
-        embedding_base_url=os.environ.get("EMBEDDING_BASE_URL", "").rstrip("/"),
-        embedding_api_key=os.environ.get("EMBEDDING_API_KEY", ""),
-        embedding_model=os.environ.get("EMBEDDING_MODEL", ""),
     )

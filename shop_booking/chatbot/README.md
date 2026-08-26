@@ -42,7 +42,7 @@ Nhờ vậy lõi state machine + PII test được không cần mock LLM (bướ
 | `session.py` | Session + store (TTL sliding 30', rút vault sau 2' — Q5) |
 | `shop_api_client.py` | Gọi endpoint GĐ1 như client **public** (giống FE web) — không auth kênh riêng |
 | `answers/` | Tủ tra cứu — bảng "loại câu hỏi → gọi API nào" (xem mục dưới) |
-| `retrieval.py` · `answers/faq.py` · `data/faq.md` | RAG: hybrid BM25 + vector, trộn RRF (xem mục dưới) |
+| `retrieval.py` · `answers/faq.py` · `data/faq.md` | RAG: BM25 thuần + chốt độ tự tin (xem mục dưới) |
 | `main.py` · `wsgi.py` | Flask `POST /chat/message` (§2.1, Q3) |
 
 ## Hai làn: điền đơn ↔ hỏi thông tin
@@ -78,16 +78,21 @@ Vị trí trong luồng: khi không resolver nào nhận, `answers.resolve` giao
 `_is_question` cũng đã được nới — câu rõ ràng là hỏi nhưng không gọi được tên loại thì gán
 `question_type="faq"` thay vì rơi tuột về luồng đặt lịch.
 
-**Retrieval** (`retrieval.py`) là hybrid, trộn bằng RRF:
+**Retrieval** (`retrieval.py`) là **BM25 thuần stdlib** — không mạng, không key, không
+phụ thuộc ngoài. Xếp hạng xong còn một chốt nữa là `Retriever._confident`: độ phủ âm tiết
+nội dung ≥ 0.34 **và** trùng ít nhất một bigram với PHÍA CÂU HỎI của mục (tiêu đề + alias).
+Không qua chốt → từ chối, vì bot trả lời tự tin mà sai chủ đề còn tệ hơn nói "em chưa hỗ
+trợ được".
 
-| Nhánh | Gánh việc gì | Cần gì |
-|---|---|---|
-| BM25 | Thuật ngữ hiếm khớp nguyên văn (`massage body 30`, tên chi nhánh) | stdlib, offline |
-| Vector | Câu diễn đạt khác ("hủy trước bao lâu" ↔ "chính sách thay đổi") | `EMBEDDING_*` |
+Nhánh vector từng có, đã gỡ ngày 26/8. Đo trên 8 câu khách nói tự nhiên: BM25 trả lời được
+3; với 5 câu còn lại, ép thẳng chunk ĐÚNG lên hạng 1 (giả lập một nhánh vector *hoàn hảo*)
+thì cả 5 **vẫn** bị `_confident` chặn — chốt đó thuần từ vựng và có quyền phủ quyết cuối
+cùng, nhánh vector chỉ xếp lại thứ hạng. Tức là nó cứu được 0/8. Thêm một dòng `> ` vào
+`data/faq.md` thì cứu 5/5.
 
-Không cấu hình `EMBEDDING_*` → BM25-only, vẫn dùng tốt. Không dùng vector DB: corpus cỡ vài
-trăm mục thì quét tuyến tính nhanh hơn mọi thứ khác. Trộn bằng RRF (`1/(60+hạng)`) chứ không
-cộng điểm có trọng số — hai thang điểm khác nhau, chuẩn hóa là nguồn chỉnh tay bất tận.
+> Muốn thêm semantic recall (embedding, hay reranker kiểu PhoRanker) thì phải sửa **cả
+> hai**: dựng nhánh mới VÀ nới `_confident` cho ứng viên đến từ nhánh đó. Bật mỗi nhánh
+> mới là tiêu tài nguyên vô ích.
 
 Bốn ràng buộc **không được nới**:
 
@@ -95,8 +100,8 @@ Bốn ràng buộc **không được nới**:
    qua `shop_api` — dữ liệu sống, ghi vào file là sai ngay hôm sau.
 2. **Chunk trả cho khách nguyên văn, không qua LLM.** Đổi lại: không bịa, không thêm round
    trip, và chunk không bao giờ vào prompt nên không có đường prompt injection gián tiếp.
-3. **Truy vấn là text ĐÃ MASK** (`ctx.raw_text`) — bật nhánh vector là câu hỏi bay sang nhà
-   cung cấp thứ hai.
+3. **Truy vấn là text ĐÃ MASK** (`ctx.raw_text`) — hiện retrieval chạy nội bộ, nhưng chốt
+   này phải còn nguyên cho ngày cắm thêm nhánh gọi ra ngoài.
 4. **Corpus review qua git.** Đừng làm bảng cho staff sửa trong admin: ai sửa được file là
    nói thay bot được.
 
