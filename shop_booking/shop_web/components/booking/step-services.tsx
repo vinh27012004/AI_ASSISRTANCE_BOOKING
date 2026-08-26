@@ -91,13 +91,13 @@ export function StepServices({
   partySize,
   services,
   courseId,
-  guestAddons,
+  addonIds,
   therapistGender,
   therapist,
   noPreference,
   startTime,
   onSelectCourse,
-  onChangeGuestAddons,
+  onChangeAddonIds,
   onSelectTherapistGender,
   onSelectNoPreference,
   onSelectTherapist,
@@ -111,13 +111,13 @@ export function StepServices({
   partySize: PartySize;
   services: RequestState<ServicesResponse>;
   courseId: number | null;
-  guestAddons: number[][];
+  addonIds: number[];
   therapistGender: Gender | null;
   therapist: Therapist | null;
   noPreference: boolean;
   startTime: string | null;
   onSelectCourse: (id: number) => void;
-  onChangeGuestAddons: (next: number[][]) => void;
+  onChangeAddonIds: (next: number[]) => void;
   onSelectTherapistGender: (next: Gender) => void;
   onSelectNoPreference: () => void;
   /** Chỉ định đích danh — gọi khi khách bấm slot của một nhân viên trên timeline. */
@@ -135,24 +135,16 @@ export function StepServices({
   // Hàng khách vừa bấm trên timeline — chỉ để vẽ ô "lượt của bạn" đúng hàng đó.
   const [pickedTherapistId, setPickedTherapistId] = useState<number | null>(null);
 
-  /**
-   * GET /slots chỉ nhận MỘT bộ addon_ids và áp cho mọi người, trong khi
-   * POST /bookings nhận add-on riêng từng người. Gửi hợp của tất cả add-on là
-   * phía an toàn: thời lượng ước tính ≥ thực tế, nên slot hiện ra không bao giờ
-   * ngắn hơn nhu cầu (thà thiếu slot còn hơn gợi ý giờ rồi bị 409).
-   */
-  const addonUnion = useMemo(
-    () => [...new Set(guestAddons.flat())].sort((a, b) => a - b),
-    [guestAddons],
-  );
-  const addonUnionKey = addonUnion.join(",");
+  // Cả nhóm dùng chung một bộ add-on (BR-10) nên gửi thẳng cho GET /slots — không còn
+  // phải hợp nhất add-on của từng người rồi ước lượng thừa như trước.
+  const addonKey = addonIds.join(",");
 
   // Đích danh giờ lọc phía client (rowFree trên timeline), nên KHÔNG gửi
   // therapist_id cho GET /slots — luôn lấy giờ nền của mọi nhân viên rồi timeline
   // tự lọc từng hàng. Chỉ giới tính mới nhờ BE lọc sẵn.
   const slots = useRequest(
     courseId
-      ? `${shop.id}|${date}|${partySize}|${courseId}|${addonUnionKey}|${therapistGender ?? ""}`
+      ? `${shop.id}|${date}|${partySize}|${courseId}|${addonKey}|${therapistGender ?? ""}`
       : null,
     // Chỉ chạy khi key khác null, tức courseId chắc chắn đã có.
     (signal) =>
@@ -162,7 +154,7 @@ export function StepServices({
           date,
           partySize,
           courseId: courseId!,
-          addonIds: addonUnion,
+          addonIds,
           therapistGender,
           therapistId: null,
         },
@@ -176,37 +168,36 @@ export function StepServices({
     api.timeline(shop.id, date, signal),
   );
 
-  const toggleAddon = (guestIndex: number, addonId: number) => {
-    const next = guestAddons.map((list, index) => {
-      if (index !== guestIndex) return list;
-      return list.includes(addonId)
-        ? list.filter((id) => id !== addonId)
-        : [...list, addonId];
-    });
-    onChangeGuestAddons(next);
+  const toggleAddon = (addonId: number) => {
+    onChangeAddonIds(
+      addonIds.includes(addonId)
+        ? addonIds.filter((id) => id !== addonId)
+        : [...addonIds, addonId],
+    );
   };
 
-  const guestDuration = (guestIndex: number) => {
-    if (!course) return 0;
-    const extra = guestAddons[guestIndex].reduce((sum, id) => {
-      const addon = addons.find((item) => item.id === id);
-      return sum + (addon?.duration_min ?? 0);
-    }, 0);
-    return course.duration_min + extra;
-  };
+  const addonMinutes = useMemo(
+    () =>
+      addonIds.reduce((sum, id) => {
+        const addon = addons.find((item) => item.id === id);
+        return sum + (addon?.duration_min ?? 0);
+      }, 0),
+    [addonIds, addons],
+  );
 
   const totalPrice = useMemo(() => {
     if (!course) return 0;
-    const addonTotal = guestAddons.flat().reduce((sum, id) => {
+    const addonPrice = addonIds.reduce((sum, id) => {
       const addon = addons.find((item) => item.id === id);
       return sum + (addon?.price ?? 0);
     }, 0);
-    return course.price * partySize + addonTotal;
-  }, [course, guestAddons, addons, partySize]);
+    // Add-on áp cho CẢ NHÓM nên phải nhân theo số người — trước đây guestAddons.flat()
+    // tự có đủ bản sao, giờ chỉ còn một danh sách nên phải nhân tường minh.
+    return (course.price + addonPrice) * partySize;
+  }, [course, addonIds, addons, partySize]);
 
-  const maxDuration = course
-    ? Math.max(...guestAddons.map((_, index) => guestDuration(index)))
-    : 0;
+  // Mọi người cùng course + cùng add-on -> thời lượng như nhau, không cần Math.max.
+  const maxDuration = course ? course.duration_min + addonMinutes : 0;
 
   // Wireframe xếp course thành "tên bên trái + chips số phút": gom các course
   // trùng tên, mỗi thời lượng một chip.
@@ -304,7 +295,9 @@ export function StepServices({
 
           <Field
             label="Tuỳ chọn"
-            hint={partySize > 1 ? "Add-on chọn riêng từng người" : "Không bắt buộc"}
+            hint={
+              partySize > 1 ? "Cả nhóm dùng chung add-on" : "Không bắt buộc"
+            }
           >
             {!course ? (
               <p className="text-sm text-ink-3">
@@ -315,41 +308,38 @@ export function StepServices({
                 Cửa hàng chưa có tuỳ chọn cho ngày này.
               </p>
             ) : (
-              <div className="flex flex-col gap-2">
-                {guestAddons.map((selectedIds, guestIndex) => (
-                  <div
-                    key={guestIndex}
-                    className="flex flex-wrap items-center gap-1.5"
-                  >
-                    {partySize > 1 ? (
-                      <span className="text-xs text-ink-3">
-                        Người {guestIndex + 1} · {guestDuration(guestIndex)}p
-                      </span>
-                    ) : null}
-                    {addons.map((addon) => {
-                      // BR-09: chặn sớm ở FE, BE vẫn kiểm lại khi tạo booking.
-                      const restricted = addon.restricted_course_ids.includes(
-                        course.id,
-                      );
-                      return (
-                        <Chip
-                          key={addon.id}
-                          selected={selectedIds.includes(addon.id)}
-                          disabled={restricted}
-                          title={
-                            restricted
-                              ? `Không thể đặt kèm ${course.name}`
-                              : undefined
-                          }
-                          onClick={() => toggleAddon(guestIndex, addon.id)}
-                        >
-                          {addon.name} +{addon.duration_min}p ·{" "}
-                          {formatYen(addon.price)}
-                        </Chip>
-                      );
-                    })}
-                  </div>
-                ))}
+              <div className="flex flex-col gap-1.5">
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {addons.map((addon) => {
+                    // BR-09: chặn sớm ở FE, BE vẫn kiểm lại khi tạo booking.
+                    const restricted = addon.restricted_course_ids.includes(
+                      course.id,
+                    );
+                    return (
+                      <Chip
+                        key={addon.id}
+                        selected={addonIds.includes(addon.id)}
+                        disabled={restricted}
+                        title={
+                          restricted
+                            ? `Không thể đặt kèm ${course.name}`
+                            : undefined
+                        }
+                        onClick={() => toggleAddon(addon.id)}
+                      >
+                        {addon.name} +{addon.duration_min}p ·{" "}
+                        {formatYen(addon.price)}
+                      </Chip>
+                    );
+                  })}
+                </div>
+                {/* BR-10: add-on áp cho cả nhóm — nói rõ để khách không tưởng
+                    đang chọn riêng cho một người. */}
+                {partySize > 1 ? (
+                  <span className="text-xs text-ink-3">
+                    Áp dụng cho cả {partySize} người
+                  </span>
+                ) : null}
               </div>
             )}
           </Field>

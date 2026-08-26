@@ -26,7 +26,7 @@ _ENTITY_KEYS = ("shop", "date", "time", "party_size", "duration", "course", "add
 
 # Loại câu hỏi thông tin (không phải điền đơn) — khớp key trong app/answers/RESOLVERS.
 QUESTION_TYPES = {"shops_open_at", "shop_contact", "shop_days_off", "course_price",
-                  "shops_near", "other"}
+                  "shops_near", "shops_list", "shops_by_staff", "faq", "other"}
 
 _NLU_SYSTEM = (
     "Bạn là bộ trích xuất tham số cho hệ thống đặt lịch massage. CHỈ trích xuất, TUYỆT ĐỐI "
@@ -36,11 +36,14 @@ _NLU_SYSTEM = (
     '"party_size":"1|null","duration":"60|null","course":"text|null","addons":[],'
     '"therapist":"name|male|female|none|null","confirm":"yes|no|null",'
     '"location":"text|null"},'
-    '"question_type":"shops_open_at|shop_contact|shop_days_off|course_price|shops_near|other|null"}\n'
+    '"question_type":"shops_open_at|shop_contact|shop_days_off|course_price|shops_near|shops_list|shops_by_staff|faq|other|null"}\n'
     "question_type CHỈ điền khi khách ĐANG HỎI thông tin về cửa hàng (giờ mở cửa, địa chỉ, "
     "số điện thoại, ngày nghỉ, giá dịch vụ, cửa hàng gần khu vực nào); khách đang TRẢ LỜI "
     "câu hỏi của trợ lý thì để null. location là khu vực/địa chỉ CỦA KHÁCH (nhà/chỗ khách "
     "đang đứng), KHÔNG phải tên cửa hàng.\n"
+    "Dùng question_type='faq' cho câu hỏi về CHÍNH SÁCH/QUY TRÌNH — đổi lịch, hủy lịch, "
+    "đặt tối đa mấy người, có chỉ định được nhân viên không, add-on đặt riêng được không, "
+    "mã đặt chỗ, quy định đến muộn. Mấy thứ này không tra bảng nào mà tra tài liệu.\n"
     "course là TÊN GÓI ĐÚNG NHƯ KHÁCH NÓI, GIỮ NGUYÊN cả số phút trong tên "
     "(vd 'momihogushi 30' -> course='momihogushi 30', TUYỆT ĐỐI không tách 30 sang duration) "
     "— tên thiếu số phút sẽ trùng nhiều gói và hệ thống không chọn được.\nn"
@@ -249,6 +252,17 @@ _NEGATIVE_WORDS = ("không", "khong", "thôi", "thoi", "bỏ qua", "bo qua", "mi
 _NEGATIVE_EXACT = {"không", "khong", "ko", "k", "thôi", "thoi"}
 
 
+# Khách gom cả danh sách ("cho tôi tất cả", "lấy hết đi", "cả 4 cái"). Chỉ dùng ở bước
+# ADDON — nơi duy nhất chọn được nhiều mục.
+_ALL_WORDS = ("tất cả", "tat ca", "toàn bộ", "toan bo", "hết", "het luôn", "trọn gói",
+              "cả bộ", "full", "lấy hết", "lay het", "thêm hết", "them het")
+
+
+def is_select_all(text: str) -> bool:
+    low = (text or "").strip().lower()
+    return any(w in low for w in _ALL_WORDS)
+
+
 def is_negative(text: str) -> bool:
     """Câu mang ý 'không / bỏ qua'. Bắt cả câu ngắn trần ('không', 'ko') lẫn cụm trong câu."""
     low = (text or "").strip().lower().strip(".!? ")
@@ -264,6 +278,19 @@ _MODIFY_TARGETS = (
     ("party",  ("số người", "so nguoi", "mấy người", "may nguoi")),
     ("course", ("dịch vụ", "dich vu", "gói", "goi", "course")),
 )
+
+
+# Đòi ĐỔI CỬA HÀNG. Phải bắt bằng Ý ĐỊNH chứ không qua tên: nhánh rule-based không biết
+# tên cửa hàng (tên đến từ API), mà đây lại đúng là lúc khách hay muốn đổi — cửa hàng hiện
+# tại không phục vụ được nhóm.
+_CHANGE_SHOP_WORDS = ("cửa hàng khác", "cua hang khac", "quán khác", "shop khác",
+                      "đổi cửa hàng", "doi cua hang", "chuyển cửa hàng", "đổi shop",
+                      "đổi sang cửa hàng", "chi nhánh khác")
+
+
+def is_change_shop_request(text: str) -> bool:
+    low = (text or "").strip().lower()
+    return any(w in low for w in _CHANGE_SHOP_WORDS)
 
 
 def is_cancel_request(text: str) -> bool:
@@ -327,17 +354,32 @@ _ASK_RULES = (
                        "nào mở", "mở tới", "mở đến", "làm tới", "làm đến", "mấy giờ")),
     ("shop_days_off", ("có làm không", "có mở không", "có nghỉ không", "ngày nghỉ",
                        "nghỉ ngày nào", "nghỉ hôm nào")),
+    # "phí" TRẦN quá rộng: nó nuốt luôn "hủy lịch có mất phí không" — câu hỏi CHÍNH SÁCH
+    # phổ biến nhất — thành câu hỏi giá, và bot đáp lại bằng bảng giá. Chỉ nhận cụm chỉ
+    # giá rõ ràng; phần còn lại để lưới FAQ hứng.
     ("course_price",  ("bao nhiêu tiền", "giá bao nhiêu", "giá thế nào", "giá là",
-                       "mất bao nhiêu", "phí")),
+                       "mất bao nhiêu", "chi phí", "bảng giá")),
     ("shop_contact",  ("ở đâu", "địa chỉ", "số điện thoại", "sđt", "số liên hệ")),
+    ("shops_by_staff", ("nữ phục vụ", "nam phục vụ", "nhân viên nữ", "nhân viên nam",
+                        "bao nhiêu nhân viên", "mấy nhân viên", "nhân viên trực",
+                        "đủ nhân viên", "nữ trực", "nam trực")),
 )
+
+# "cửa hàng nào" quá chung nên xét CUỐI CÙNG, sau cả lưới "có nhắc giờ" — nếu không,
+# "Còn cửa hàng nào lúc 15:00 không?" sẽ bị hiểu thành hỏi danh sách.
+_ASK_LIST_WORDS = ("cửa hàng nào", "cua hang nao", "những cửa hàng", "các cửa hàng",
+                   "danh sách cửa hàng", "bao nhiêu cửa hàng", "mấy cửa hàng")
 
 
 # Từ để hỏi. Khách TRẢ LỜI câu bot hỏi ("Sendai", "Gói đầu tiên", "momihogushi 30") gần như
 # không bao giờ chứa mấy từ này, còn câu hỏi thật thì hầu như luôn có (kể cả khi quên "?":
 # "Cửa hàng nào mở lúc 7h tối nay.").
 _QUESTION_WORDS = ("nào", "đâu", "bao nhiêu", "mấy giờ", "mấy tiếng", "khi nào", "thế nào",
-                   "ra sao", "có phải", "được không", "cho hỏi", "cho em hỏi")
+                   "ra sao", "có phải", "được không", "cho hỏi", "cho em hỏi",
+                   # Dạng ĐỀ NGHỊ: khách không đặt câu hỏi mà nhờ tra cứu ("tôi muốn tìm
+                   # cửa hàng có 3 nữ phục vụ") — vẫn là hỏi thông tin.
+                   "muốn tìm", "tìm giúp", "tìm cho", "kiếm giúp", "kiếm cho",
+                   "gợi ý", "tư vấn", "cho tôi biết", "cho em biết", "có những")
 
 
 def looks_like_question(text: str) -> bool:
@@ -345,14 +387,28 @@ def looks_like_question(text: str) -> bool:
     return "?" in low or any(w in low for w in _QUESTION_WORDS)
 
 
+_CLOCK_RE = re.compile(r"\b\d{1,2}\s*(?:h|:|giờ|gio)")
+_SHOP_WORDS = ("cửa hàng", "cua hang", "shop", "quán", "quan", "chi nhánh")
+
+
 def _detect_question(low: str) -> str | None:
     for qt, words in _ASK_RULES:
         if any(w in low for w in words):
             return qt
+    # Lưới cuối: hỏi về CỬA HÀNG + có nêu GIỜ nhưng không dùng chữ "mở" nào trong bảng
+    # ("Còn cửa hàng nào lúc 15:00 không?") -> vẫn là hỏi giờ mở cửa.
+    if any(w in low for w in _SHOP_WORDS) and _CLOCK_RE.search(low):
+        return "shops_open_at"
+    if any(w in low for w in _ASK_LIST_WORDS):
+        return "shops_list"
     return None
 
 
-_HANDOFF_WORDS = ("nhân viên", "người thật", "gặp người", "gọi cửa hàng", "tổng đài")
+# Phải là ĐÒI GẶP NGƯỜI THẬT. Trước đây để "nhân viên" trần nên "cửa hàng nào có 2 nhân
+# viên nam trực?" cũng bị đẩy sang handoff — khách hỏi thông tin lại bị mời gọi điện.
+_HANDOFF_WORDS = ("gặp nhân viên", "gap nhan vien", "gặp người", "người thật", "nguoi that",
+                  "nói chuyện với", "noi chuyen voi", "gọi cửa hàng", "goi cua hang",
+                  "tổng đài", "tong dai", "nhân viên tư vấn", "nhân viên hỗ trợ")
 # "cancel"/"ok"/"oke" giữ lại: từ mượn khách Việt vẫn hay gõ.
 _CANCEL_WORDS = ("hủy", "huỷ", "cancel")
 _MODIFY_WORDS = ("sửa", "đổi lịch", "thay đổi")

@@ -132,11 +132,14 @@ def _facts_for(state_key: str, session: Session, api_result: dict) -> dict:
     if state_key == "SLOT":
         times = ar.get("slots") or ar.get("suggested_slots") or []
         facts["gio_trong"] = times
-        facts["slots"] = ", ".join(times) if times else "(chưa có)"
+        facts["slots"] = format_slot_list(times) if times else "(chưa có)"
         # Khách đã nêu một giờ nhưng giờ đó hết chỗ -> nói thẳng ra, đừng lặng lẽ đọc danh
         # sách khác (khách sẽ tưởng bot bỏ qua lời mình).
         het = ar.get("wanted_time_unavailable")
         facts["gio_het"] = f"Giờ {het} không còn trống ạ. " if het else ""
+        # NÊU RÕ NGÀY: NLU có thể đã đổi ngày ngầm ("7h tối nay" khi đơn đang là 31/8).
+        # Không in ra thì khách không có cách nào biết đơn vừa nhảy sang ngày khác.
+        facts["ngay"] = f"Ngày {format_date_list([session.slots.date])}, " if session.slots.date else ""
     elif state_key == "CONFIRM":
         facts["summary"] = _order_summary(session, ar)
     elif state_key in ("DONE", "UPDATED", "CANCELLED"):
@@ -180,6 +183,55 @@ def format_date_list(dates, limit: int = _DATE_LIST_LIMIT) -> str:
     return ", ".join(shown)
 
 
+# Bước giờ của hệ thống là 15 phút (BR-02: course bội số 15). CỐ ĐỊNH 15 chứ không suy từ
+# dữ liệu — với danh sách thưa như ["14:30","15:15"] mà suy bước = 45 thì sẽ gộp thành dải
+# "14:30–15:15", hoá ra mời cả những giờ không hề trống.
+_SLOT_STEP = 15
+_RUN_MIN = 3                 # dưới 3 mốc thì liệt kê ngắn hơn viết dải
+_DAYPARTS = (("sáng", 0, 12 * 60), ("chiều", 12 * 60, 18 * 60), ("tối", 18 * 60, 24 * 60))
+
+
+def _mins(t: str) -> int:
+    h, m = t.split(":")
+    return int(h) * 60 + int(m)
+
+
+def format_slot_list(slots) -> str:
+    """Gom giờ trống cho DỄ ĐỌC: chia theo buổi, các mốc liên tiếp nhau gộp thành dải.
+
+    36 mốc giờ nối bằng dấu phẩy trên một dòng thì không ai đọc nổi (khách phản ánh)."""
+    try:
+        pts = sorted({_mins(t) for t in (slots or [])})
+    except (ValueError, IndexError):
+        return ", ".join(slots or [])
+    if not pts:
+        return ""
+
+    def hhmm(v: int) -> str:
+        return f"{v // 60:02d}:{v % 60:02d}"
+
+    out = []
+    for ten, lo, hi in _DAYPARTS:
+        # Chia theo buổi TRƯỚC rồi mới gộp dải — gộp trước thì một dải 09:00→18:00 sẽ bị
+        # xếp trọn vào "sáng" theo mốc đầu, đọc thành sai.
+        sub = [v for v in pts if lo <= v < hi]
+        if not sub:
+            continue
+        runs = [[sub[0], sub[0]]]
+        for v in sub[1:]:
+            if v - runs[-1][1] == _SLOT_STEP:
+                runs[-1][1] = v
+            else:
+                runs.append([v, v])
+        phan = []
+        for a, b in runs:
+            n = (b - a) // _SLOT_STEP + 1
+            phan.append(f"{hhmm(a)}–{hhmm(b)}" if n >= _RUN_MIN
+                        else ", ".join(hhmm(a + i * _SLOT_STEP) for i in range(n)))
+        out.append(f"{ten} {', '.join(phan)}")
+    return "; ".join(out)
+
+
 def _date_list_line(active_dates) -> str:
     """Câu đọc các ngày còn mở. Chưa dò được (API lỗi) -> rỗng, câu chỉ hỏi chung chung."""
     if not active_dates:
@@ -198,10 +250,11 @@ def _quick_edit_note(session: Session) -> str:
     return live.format(t=f"{left // 60}:{left % 60:02d}") if left > 0 else over
 
 
-# {p}=ghi chú "cả nhóm dùng chung" khi đặt nhóm, {ds}=danh sách add-on đọc ra
-_ADDON_LINE = ("Anh/chị muốn thêm dịch vụ bổ sung nào không ạ? Hiện có: {ds}. "
-               "Anh/chị đọc tên dịch vụ muốn thêm (có thể chọn NHIỀU, đọc liền nhau), "
-               "hoặc nói “không” để bỏ qua.{p}")
+# {ds}=danh sách add-on đánh số (mỗi dòng một mục, khớp cách LLM trình bày danh sách gói),
+# {p}=ghi chú "áp dụng cho cả nhóm" khi đặt nhóm.
+_ADDON_LINE = ("Anh/chị muốn thêm dịch vụ bổ sung nào không ạ?\n{ds}\n"
+               "Anh/chị đọc tên hoặc số thứ tự dịch vụ muốn thêm — chọn nhiều cũng "
+               "được, muốn lấy hết thì nói “tất cả”, không thêm gì thì nói “không” ạ.{p}")
 
 
 def _addon_prompt_line(session: Session, api_result: dict) -> str:
@@ -212,12 +265,16 @@ def _addon_prompt_line(session: Session, api_result: dict) -> str:
     được nhiều, chat không nói thì khách tưởng chỉ chọn một). Add-on bị cấm với course
     đang chọn (BR-09) bị loại khỏi danh sách để không mời nhầm (A3 sớm)."""
     s = session.slots
-    offered = [
-        f'{a.get("name")} · {a.get("duration_min")} phút'
-        for a in (api_result or {}).get("addons", [])
+    allowed = [
+        a for a in (api_result or {}).get("addons", [])
         if not (s.course_id and s.course_id in (a.get("restricted_course_ids") or []))
     ]
-    return _ADDON_LINE.format(ds=", ".join(offered), p=_addon_group_note(session))
+    # Trình bày GIỐNG danh sách gói: mỗi dòng một mục, đánh số, kèm thời lượng và giá.
+    offered = "\n".join(
+        f'{i}. {a.get("name")} · {a.get("duration_min")} phút · {a.get("price")}¥'
+        for i, a in enumerate(allowed, 1)
+    )
+    return _ADDON_LINE.format(ds=offered, p=_addon_group_note(session))
 
 
 def _addon_group_note(session: Session) -> str:
@@ -260,7 +317,10 @@ def _order_summary(session: Session, api_result: dict) -> str:
     elif s.duration:
         parts.append(f"{s.duration} phút")
     if s.addon_ids:
-        parts.append(f"+{len(s.addon_ids)} dịch vụ thêm")
+        # ĐỌC TÊN chứ không chỉ đếm: đây đúng chỗ khách cần kiểm kỹ nhất trước khi chốt,
+        # "+4 dịch vụ thêm" thì kiểm bằng gì.
+        parts.append("thêm " + ", ".join(s.addon_names) if s.addon_names
+                     else f"+{len(s.addon_ids)} dịch vụ thêm")
     if s.therapist_gender:
         parts.append("nhân viên " + ("nữ" if s.therapist_gender == "female" else "nam"))
     elif s.therapist_id:

@@ -6,6 +6,7 @@ qua key INFO nằm trong _LITERAL_SAFE_KEYS, không cho LLM viết lại (§10 �
 
 from __future__ import annotations
 
+import re
 from datetime import date as _date, timedelta as _td
 
 from app import matching, nlg
@@ -56,6 +57,22 @@ def _resolve_shop(ctx: QueryCtx, shops: list[dict]) -> dict | None:
 
 _ASK_WHICH_SHOP = "Anh/chị muốn hỏi cửa hàng nào ạ?"
 
+# Câu hỏi NỐI TIẾP câu trước ("trong 2 cửa hàng đó cái nào…"). Cố ý là CỤM, không phải chữ
+# "đó" trần — "ngày đó", "giờ đó" nhan nhản, bắt bừa là lọc nhầm.
+_REFER_BACK = ("cửa hàng đó", "cua hang do", "cửa hàng trên", "trong đó", "trong số đó",
+               "trong 2 cửa hàng", "trong hai cửa hàng", "trong 3 cửa hàng",
+               "mấy cửa hàng đó", "những cửa hàng đó", "các cửa hàng đó",
+               "vừa rồi", "vừa nêu", "kể trên", "nói trên")
+
+
+def _scope(ctx: QueryCtx, shops: list[dict]) -> list[dict]:
+    """Thu hẹp về danh sách câu trước NẾU khách đang hỏi nối tiếp. Không thì giữ nguyên."""
+    low = (ctx.raw_text or "").lower()
+    if not ctx.shortlist or not any(w in low for w in _REFER_BACK):
+        return shops
+    narrowed = [s for s in shops if s.get("id") in ctx.shortlist]
+    return narrowed or shops
+
 
 # --------------------------------------------------------------------------- #
 #  "Cửa hàng nào còn mở lúc 7h?"                                               #
@@ -105,33 +122,132 @@ def _day_hours(api, shops: list[dict], day: str) -> tuple[str, str] | None:
     return f"{lo // 60:02d}:{lo % 60:02d}", f"{hi // 60:02d}:{hi % 60:02d}"
 
 
+def _shops_open_on(api, day: str) -> Answer:
+    """Cửa hàng CÓ LÀM trong ngày (có ít nhất một ca) — không xét giờ cụ thể."""
+    hits = [s for s in api.get_shops() if _shifts(api, s["id"], day)]
+    if not hits:
+        return Answer(f"Dạ ngày {_d(day)} không cửa hàng nào có lịch làm ạ. "
+                      "Anh/chị thử hỏi giúp em ngày khác nhé.")
+    return Answer(f"Ngày {_d(day)} các cửa hàng có làm là: "
+                  f"{', '.join(s['name'] for s in hits)} ạ.",
+                  shortlist=tuple(s["id"] for s in hits))
+
+
+def shops_list(ctx: QueryCtx, api) -> Answer:
+    """"Bên mình có những cửa hàng nào?" — câu cơ bản nhất, trước đây rơi vào nhánh
+    "em chưa hỗ trợ được" vì NLU gán question_type=other."""
+    shops = api.get_shops()
+    items = "; ".join(f"{s['name']} ({s['address']})" for s in shops)
+    return Answer(f"Dạ bên em có {len(shops)} cửa hàng ạ: {items}.",
+                  shortlist=tuple(s["id"] for s in shops))
+
+
+# --------------------------------------------------------------------------- #
+#  "Cửa hàng nào đang có 3 nữ phục vụ?"                                        #
+# --------------------------------------------------------------------------- #
+
+_GENDER_VI = {"female": "nữ", "male": "nam"}
+
+
+def _wanted_gender(value) -> str | None:
+    v = str(value or "").strip().lower()
+    if v in ("female", "nu", "nữ"):
+        return "female"
+    if v in ("male", "nam"):
+        return "male"
+    return None                          # tên riêng / không nêu -> đếm mọi nhân viên
+
+
+def _staff_count(api, shop_id: int, day: str, gender: str | None) -> int:
+    data = api.get_timeline(shop_id, day)
+    return len([t for t in data.get("therapists", [])
+                if t.get("shifts") and (gender is None or t.get("gender") == gender)])
+
+
+# "3 nữ", "2 nhân viên", "3 người" — NLU stateless hay bỏ sót vì thiếu chữ "người".
+_COUNT_RE = re.compile(r"(\d{1,2})\s*(?:nữ|nu|nam|nhân viên|nhan vien|người|nguoi)")
+
+
+def _wanted_count(ctx: QueryCtx) -> tuple[int, bool]:
+    """(Số nhân viên cần, khách CÓ nêu số hay không).
+
+    Cờ thứ hai để khỏi viết "đủ 1 nhân viên nữ" khi khách chỉ hỏi "cửa hàng nào có nhân
+    viên nữ" — câu đó đọc rất kỳ."""
+    m = _COUNT_RE.search((ctx.raw_text or "").lower())
+    if m:
+        return max(int(m.group(1)), 1), True
+    ps = ctx.entities.get("party_size") or ctx.party_size
+    try:
+        return (max(int(ps), 1), True) if ps else (1, False)
+    except (TypeError, ValueError):
+        return 1, False
+
+
+def shops_by_staff(ctx: QueryCtx, api) -> Answer:
+    """Lọc cửa hàng theo SỐ nhân viên trực (và giới tính nếu khách nêu).
+
+    Đếm người CÓ CA trong ngày qua /timeline — điều kiện cần, chưa xét họ còn trống giờ
+    nào, nên câu trả lời chỉ nói "có ... trực", không hứa đặt được."""
+    day = ctx.entities.get("date") or ctx.date or _today()
+    gender = _wanted_gender(ctx.entities.get("therapist"))
+    need, said_count = _wanted_count(ctx)
+
+    gv = f" {_GENDER_VI[gender]}" if gender else ""
+    nhan = f"{need} nhân viên{gv}" if said_count else f"nhân viên{gv}"
+    rows = [(s, _staff_count(api, s["id"], day, gender)) for s in _scope(ctx, api.get_shops())]
+    ok = [s for s, n in rows if n >= need]
+
+    # Nhóm ≥2 không được chỉ định người (BR-04) -> nói trước, khỏi hụt hẫng ở bước sau.
+    luu_y = (" Lưu ý nhóm từ 2 người thì cửa hàng sắp nhân viên giúp, mình không chỉ định "
+             "được ạ." if need >= 2 and gender else "")
+
+    if not ok:
+        best_s, best_n = max(rows, key=lambda r: r[1], default=(None, 0))
+        if best_s is None or best_n == 0:
+            return Answer(f"Dạ ngày {_d(day)} chưa cửa hàng nào có {nhan} trực ạ. "
+                          "Anh/chị thử hỏi giúp em ngày khác nhé.")
+        return Answer(f"Dạ ngày {_d(day)} chưa cửa hàng nào đủ {nhan} trực ạ. Nhiều nhất là "
+                      f"{best_s['name']} với {best_n} người.{luu_y}")
+
+    names = ", ".join(s["name"] for s in ok)
+    du = "đủ " if said_count else ""
+    ids = tuple(s["id"] for s in ok)
+    text = f"Ngày {_d(day)}, cửa hàng có {du}{nhan} trực: {names} ạ.{luu_y}"
+    # Duy nhất -> đề xuất điền luôn ô cửa hàng.
+    return Answer(text, shortlist=ids,
+                  suggest={"shop": ok[0]["name"]} if len(ok) == 1 else {})
+
+
 def shops_open_at(ctx: QueryCtx, api) -> Answer:
     t = ctx.entities.get("time")
-    if not t:
-        return Answer("Anh/chị muốn hỏi cửa hàng mở vào khung giờ nào ạ?")
     day = ctx.entities.get("date") or ctx.date or _today()
+    if not t:
+        # "Cửa hàng nào đang mở hôm nay?" — hỏi theo NGÀY chứ không theo giờ. Hỏi ngược
+        # "khung giờ nào ạ?" là né câu hỏi (khách phản ánh); trả lời thẳng theo ngày.
+        return _shops_open_on(api, day)
     times = [t]
     if ctx.time_ambiguous:                      # "7h" trần -> trả lời cả 07:00 lẫn 19:00
         alt = _plus12(t)
         if alt:
             times.append(alt)
 
-    shops = api.get_shops()
-    parts, found = [], False
+    shops = _scope(ctx, api.get_shops())
+    parts, found, hit_ids = [], False, []
     for tt in times:
-        names = [s["name"] for s in shops if _has_shift_at(api, s["id"], day, tt)]
+        matched = [s for s in shops if _has_shift_at(api, s["id"], day, tt)]
+        names = [s["name"] for s in matched]
         if names:
             found = True
+            hit_ids += [s["id"] for s in matched if s["id"] not in hit_ids]
         parts.append(f"lúc {tt} có {', '.join(names)}" if names
                      else f"lúc {tt} thì không cửa hàng nào làm")
     # Ngày phải nói RÕ: ca làm đổi theo từng ngày, không nói thì khách hiểu thành "luôn mở".
     head = f"Ngày {_d(day)}, {'; '.join(parts)} ạ."
 
     if found:
-        # Chỉ nhắc "giờ trống xem sau" khi THỰC SỰ có cửa hàng — không có mà vẫn nói thì
-        # câu vừa thừa vừa khó hiểu (khách phản ánh).
-        return Answer(head + " Đây là giờ cửa hàng có nhân viên làm; giờ trống cụ thể em "
-                             "xem giúp sau khi anh/chị chọn gói dịch vụ ạ.")
+        # Trả lời ĐÚNG câu hỏi: có cửa hàng nào. Không kèm giải thích về giờ trống của nhân
+        # viên — khách chỉ hỏi cửa hàng, thêm vào chỉ làm câu dài (khách phản ánh).
+        return Answer(head, shortlist=tuple(hit_ids))
 
     hours = _day_hours(api, shops, day)
     if hours:                                   # đừng để câu trả lời cụt ở chỗ "không có"

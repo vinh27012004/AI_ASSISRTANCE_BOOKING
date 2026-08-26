@@ -271,7 +271,7 @@
 
 ### 3.6 `GET /admin/bookings?shop_id=&date=&status=&page=&per_page=` + `PATCH /admin/bookings/{id}/status`
 - **Mục đích:** xem booking của shop (UC-12); cập nhật sau phục vụ. `shop_id` bắt buộc; `date`/`status` optional để lọc.
-- **GET Response 200 (có phân trang):** `{"items": [...], "page": 1, "per_page": 50, "total": 123}`. Mỗi item gồm `booking_code`, `status`, `date`, `start_time`, `party_size`, `customer` (phone/email/member_type/rank/visit_count), `course`, và `reservations[]` — mỗi reservation có `therapist_id` + `therapist_name` (BE phân công) và `requested_therapist_name` (khách xin ai) để đối chiếu BR-21, cùng `duration_min` (đã cộng add-on riêng của từng khách).
+- **GET Response 200 (có phân trang):** `{"items": [...], "page": 1, "per_page": 50, "total": 123}`. Mỗi item gồm `booking_code`, `status`, `date`, `start_time`, `party_size`, `customer` (phone/email/member_type/rank/visit_count), `course`, và `reservations[]` — mỗi reservation có `therapist_id` + `therapist_name` (BE phân công) và `requested_therapist_name` (khách xin ai) để đối chiếu BR-21, cùng `duration_min` (đã cộng add-on). Cấu trúc `reservations[].addon_ids` vẫn theo TỪNG người — booking cũ có thể khác nhau; từ khi BR-10 cập nhật, client gửi cùng một bộ cho cả nhóm.
 - **PATCH** `{"status":"completed"}` → **trong cùng transaction** +1 `visit_count` của khách (BR-19). `no_show` không cộng.
 - **Chuyển trạng thái hợp lệ:** `confirmed`/`pending` → `completed` | `no_show` | `cancelled`. Các trạng thái `cancelled`/`completed`/`no_show` là **kết thúc**, không đi tiếp được.
 - **Lỗi đặc thù:** 422 `INVALID_STATUS_TRANSITION` khi chuyển không hợp lệ (vd cancelled → completed) — "Không thể chuyển trạng thái này." kèm `{from, to}`.

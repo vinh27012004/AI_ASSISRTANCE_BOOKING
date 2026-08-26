@@ -58,3 +58,5 @@ node_modules/
 
 # --- Các file tạm khác ---
 .claude/
+# Cache vector của corpus FAQ — sinh lại được từ data/faq.md, đừng commit.
+shop_booking/chatbot/data/faq_vectors.json

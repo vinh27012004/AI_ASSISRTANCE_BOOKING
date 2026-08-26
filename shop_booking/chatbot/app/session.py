@@ -28,6 +28,9 @@ class Slots:
     # BR-10 (BA cập nhật): cả nhóm dùng CHUNG course và add-on -> một danh sách duy nhất,
     # gửi lặp lại cho từng reservation lúc tạo booking.
     addon_ids: list[int] = field(default_factory=list)
+    # Tên add-on đã chọn — để đọc lại ở CONFIRM mà không phải gọi /services lần nữa
+    # (giống course_name). Khách phải KIỂM được mình thêm gì trước khi chốt.
+    addon_names: list[str] = field(default_factory=list)
     addons_decided: bool = False          # đã chốt add-on (kể cả chốt "không thêm gì")
     slot: Optional[str] = None            # "HH:MM" đã chốt
     therapist_id: Optional[int] = None    # khách chỉ định đích danh (chỉ party_size==1)
@@ -66,6 +69,11 @@ class Session:
     # Số lượt hỏi NGOÀI PHẠM VI liên tiếp — chạm ngưỡng thì mời gọi cửa hàng, để khách và
     # bot không quay vòng "em chưa hỗ trợ được" mãi.
     offtopic_count: int = 0
+    # Vệt intent đã nhận qua các lượt ("book", "ask_info:shops_open_at", "META:hủy lịch"…)
+    # — in ở cuối mỗi khối log để đọc một khối là thấy cả đường đi của hội thoại.
+    intent_trail: list[str] = field(default_factory=list)
+    # shop_id mà câu trả lời tra cứu gần nhất đã nêu — ngữ cảnh cho câu hỏi nối tiếp.
+    shop_shortlist: list[int] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

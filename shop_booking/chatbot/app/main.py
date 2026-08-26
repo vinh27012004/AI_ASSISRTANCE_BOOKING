@@ -49,10 +49,17 @@ def create_app() -> Flask:
 
     @app.get("/health")
     def health():
+        # `faq` cho biết corpus nạp được mấy mục — deploy quên copy data/faq.md thì thấy 0
+        # ngay ở đây, thay vì phải đợi khách hỏi mới biết bot mất khả năng trả lời.
+        retriever = getattr(orch, "_faq_retriever", None)
         return jsonify({
             "status": "ok",
             "llm": "router" if settings.use_real_llm else "fake",
             "session": "redis" if settings.use_redis else "memory",
+            "faq": {
+                "chunks": len(retriever.chunks) if retriever else 0,
+                "retrieval": "hybrid" if (retriever and retriever.vectors) else "bm25",
+            },
         })
 
     @app.post("/chat/message")

@@ -34,11 +34,13 @@ class TurnLog:
         self.t0 = time.time()
         self.rows: list[tuple[str, str]] = []
 
-    def render(self, state_out: str, slots: str) -> str:
+    def render(self, state_out: str, slots: str, trail: str = "") -> str:
         secs = time.time() - self.t0
         out = ["", f"┌─ LƯỢT {self.turn} · conv={self.cid} · vào state={self.state_in}"]
         for tag, text in self.rows:
             out.append(f"│ {tag:<7}{text}")
+        if trail:
+            out.append(f"│ {'INTENT':<7}{trail}")
         tail = f"└─ ra state={state_out} · {secs:.2f}s"
         if slots:
             tail += f" · {slots}"
@@ -58,12 +60,12 @@ def current() -> TurnLog | None:
     return getattr(_local, "turn", None)
 
 
-def finish(state_out: str = "?", slots: str = "") -> None:
+def finish(state_out: str = "?", slots: str = "", trail: str = "") -> None:
     tl = current()
     if tl is None:
         return
     _local.turn = None
-    logger.info("%s", tl.render(state_out, slots))
+    logger.info("%s", tl.render(state_out, slots, trail))
 
 
 def _row(tag: str, text: str) -> None:
@@ -93,9 +95,30 @@ def nlu(source: str, secs: float, intent: str, question_type, entities: dict) ->
     _row("①NLU", line + (f" · {ent}" if ent else ""))
 
 
-def lane(name: str, detail: str = "") -> None:
-    """TASK (điền đơn) · QUERY (hỏi thông tin) · META (sửa/hủy/gặp người)."""
-    _row("LANE", name + (f" → {detail}" if detail else ""))
+def nlu_skipped(reason: str) -> None:
+    """Nhánh không đi qua NLU (câu chào, sửa/hủy, nhập lại email). Vẫn phải có dòng ①,
+    nếu không đọc log sẽ tưởng NLU im lặng nuốt lượt."""
+    _row("①NLU", f"(bỏ qua — {reason})")
+
+
+# Intent mà mỗi làn coi là "bình thường". Lệch khỏi đây mới đáng ghi chú — ghi mọi lượt
+# thì dòng nào cũng có, đọc thành nhiễu.
+_LANE_EXPECT = {
+    "TASK": {"book"},
+    "QUERY": {"ask_info", "chitchat"},
+    "META": {"handoff", "cancel", "modify"},
+}
+
+
+def lane(name: str, detail: str = "", nlu_intent: str = "") -> None:
+    """TASK (điền đơn) · QUERY (hỏi thông tin) · META (sửa/hủy/gặp người).
+
+    `nlu_intent` để nói rõ khi làn ĐI KHÁC intent mà NLU trích được — vd NLU bảo "modify"
+    nhưng chưa có booking nào nên vẫn phải điền đơn. Không ghi thì đọc log rất khó hiểu."""
+    line = name + (f" → {detail}" if detail else "")
+    if nlu_intent and nlu_intent not in _LANE_EXPECT.get(name, set()):
+        line += f"   ⚠ NLU trích intent={nlu_intent}, làn vẫn đi {name}"
+    _row("LANE", line)
 
 
 def merge(changes: list[str]) -> None:

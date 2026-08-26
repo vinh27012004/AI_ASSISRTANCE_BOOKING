@@ -7,6 +7,7 @@ Bước ③④⑤ là code -> assert state kế + tool được gọi; LLM ở �
 import os
 import sys
 import time
+from dataclasses import asdict
 from datetime import date, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -15,8 +16,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _FUTURE_DATE = (date.today() + timedelta(days=2)).isoformat()
 
 from app import pii
+from app import retrieval
 from app import state_machine as sm
 from app import states as S
+from app.answers import faq
 from app.config import Settings
 from app.orchestrator import Orchestrator
 from app.session import InMemorySessionStore, Session, Slots
@@ -43,6 +46,7 @@ class StubApi:
         self.create_error = None
         self.last_slots_kw = None
         self.closed_dates = set()   # ISO ngày shop nghỉ -> get_therapists trả rỗng
+        self.dead_shops = set()     # shop_id KHÔNG có ca ngày nào (như Cửa hàng ABC thật)
         self.blocked_phones = set() # SĐT bị chặn NG (A5) — chặn theo từng số
         self.booking_email = None   # email của booking (để xác thực sửa/hủy bằng email — BR-15)
         self.calls = []
@@ -59,17 +63,20 @@ class StubApi:
     # Ca làm KHÁC nhau giữa 2 shop -> hỏi "mở lúc 19:00" phân biệt được (chỉ shop 2 còn làm).
     def get_timeline(self, shop_id, date):
         self.calls.append("timeline")
-        if date in self.closed_dates:
+        if shop_id in self.dead_shops or date in self.closed_dates:
             return {"date": date, "therapists": []}
         hours = ("12:00", "21:00") if shop_id == 2 else ("10:00", "18:00")
+        # Đội ngũ KHÁC nhau giữa 2 shop -> test lọc theo số lượng + giới tính.
+        roster = ([(5, "Hana", "female"), (6, "Mika", "female"), (7, "Ken", "male")]
+                  if shop_id == 2 else [(5, "Hana", "female")])
         return {"date": date, "therapists": [{
-            "id": 5, "name": "Hana", "gender": "female",
+            "id": tid, "name": nm, "gender": g,
             "shifts": [{"start_time": hours[0], "end_time": hours[1]}], "bookings": [],
-        }]}
+        } for tid, nm, g in roster]}
 
     def get_services(self, shop_id, date, party_size=None):
         self.calls.append("services")
-        if date in self.closed_dates:              # A1: ngày shop nghỉ -> 200 rỗng
+        if shop_id in self.dead_shops or date in self.closed_dates:   # A1: 200 rỗng
             return {"courses": [], "addons": [], "reason": "SHOP_CLOSED"}
         return {"courses": [{"id": 3, "name": "Toàn thân", "duration_min": 60, "price": 5000}],
                 "addons": [{"id": 7, "name": "Foot", "duration_min": 15, "price": 1000,
@@ -97,7 +104,8 @@ class StubApi:
         d = d0
         while d <= d1:
             iso = d.isoformat()
-            (closed_dates if iso in self.closed_dates else open_dates).append(iso)
+            shut = shop_id in self.dead_shops or iso in self.closed_dates
+            (closed_dates if shut else open_dates).append(iso)
             d += timedelta(days=1)
         return {"from": date_from, "to": date_to,
                 "open_dates": open_dates, "closed_dates": closed_dates}
@@ -666,9 +674,9 @@ def test_cancel_in_session():
     check(reply.state == S.CANCELLED and reply.done is True, "cancel: state CANCELLED, done")
 
 
-def test_modify_party_and_course_reset_addons():
-    """Sửa số người / đổi course phải XÓA add-on cũ (BR-10). Trước đây modify:course gán
-    s.addons=[] (field không tồn tại) nên add-on không hề reset — nay reset đúng."""
+def test_modify_party_keeps_addons_course_resets():
+    """Đổi COURSE phải xoá add-on (combo cấm khác — BR-09); đổi SỐ NGƯỜI thì KHÔNG, vì add-on
+    dùng chung cả nhóm nên không phụ thuộc số người (BR-10, BA cập nhật)."""
     def _booked_group():
         return Session(conversation_id="c", turn_count=1, booking_code="X", editing=False,
                        slots=Slots(shop_id=1, date="d", party_size=2, course_id=3,
@@ -678,8 +686,8 @@ def test_modify_party_and_course_reset_addons():
     sm.apply_modify_target(ses, "party")
     s = ses.slots
     check(s.party_size is None, "đổi số người -> xóa số người")
-    check(s.addon_ids == [] and s.addons_decided is False,
-          "đổi số người -> hỏi lại add-on")
+    check(s.addon_ids == [7, 8] and s.addons_decided is True,
+          "đổi số người GIỮ nguyên add-on (dùng chung, không phụ thuộc số người)")
 
     ses2 = _booked_group()
     sm.apply_modify_target(ses2, "course")
@@ -698,7 +706,6 @@ def test_addon_group_prompt_says_shared():
     p = nlg.build_prompt("ADDON", ses, {"addons": []})
     out = nlg.generate(p, _HallucinatingLLM())     # dù có LLM, ADDON vẫn ép template tất định
     check("cả 2 người" in out, "nói rõ add-on áp cho cả nhóm")
-    check("NHIỀU" in out, "nói rõ chọn được nhiều dịch vụ")
     check("Người 1/2" not in out and "Người 2/2" not in out, "không còn hỏi theo từng người")
 
 
@@ -732,21 +739,19 @@ def test_match_addons_rejects_restricted():
 
 
 def test_modify_party_in_session():
-    """Sửa số người 1->2 trong phiên: hỏi lại add-on (dùng chung) rồi PATCH đúng (BR-10)."""
+    """Sửa số người 1->2 trong phiên: GIỮ add-on đã chọn, chỉ hỏi lại giờ rồi PATCH (BR-10)."""
     api = StubApi()
     orch = _orch(api)
     _drive(orch, "cmp", *_HAPPY)                       # đặt 1 người xong
     orch.handle_turn("cmp", "sửa lịch")
     orch.handle_turn("cmp", "đổi số người")
     r = orch.handle_turn("cmp", "2 người")
-    check(r.state == S.ADDON, f"đổi số người -> hỏi lại add-on, đang {r.state}")
-    r = orch.handle_turn("cmp", "Foot")             # add-on chọn 1 lần, dùng chung cả nhóm
-    check(r.state == S.SLOT, f"chốt add-on -> chọn giờ, đang {r.state}")
+    check(r.state == S.SLOT, f"đổi số người -> giữ add-on, sang chọn giờ luôn, đang {r.state}")
     orch.handle_turn("cmp", "14:15")
     r = orch.handle_turn("cmp", "đồng ý đặt")
     check(api.patched_body is not None, "modify party: phải gọi PATCH")
     check(api.patched_body["party_size"] == 2, "PATCH đúng 2 người")
-    check([x["addon_ids"] for x in api.patched_body["reservations"]] == [[7], [7]],
+    check([x["addon_ids"] for x in api.patched_body["reservations"]] == [[], []],
           "PATCH add-on dùng CHUNG cho cả nhóm sau khi sửa số người (BR-10)")
     check(r.state == S.DONE, "modify party xong -> DONE")
 
@@ -1013,8 +1018,8 @@ def test_shops_open_at_answers():
     r = orch.handle_turn("cq2", "Cửa hàng nào còn mở lúc 7h tối vậy em?")
     check("Cửa hàng Sendai" in r.reply_text, "shop có ca lúc 19:00 phải được nêu")
     check("Shop A" not in r.reply_text, "shop đã hết ca lúc 19:00 KHÔNG được nêu")
-    # Không hứa "còn chỗ": /timeline chỉ nói cửa hàng có làm, chốt giờ trống là GET /slots.
-    check("giờ trống" in r.reply_text, "phải nói rõ giờ trống cụ thể xem sau")
+    check("giờ trống" not in r.reply_text,
+          "chỉ trả lời có cửa hàng nào, không giải thích thêm về giờ trống")
 
 
 def test_short_answer_stays_in_flow():
@@ -1132,6 +1137,380 @@ def test_shops_open_at_none_open_reads_day_hours():
     orch.handle_turn("cq9", "")
     r2 = orch.handle_turn("cq9", "Có cửa hàng nào mở lúc 5h sáng không ?")
     check("từ 10:00 đến 21:00" in r2.reply_text, "hỏi giờ quá sớm vẫn đọc khung giờ")
+
+
+def test_name_match_tolerates_typo_and_extra_words():
+    """Khớp tên hạ dần: chuỗi-con -> theo TỪ ("Shibuya đi") -> khớp MỜ ("Momihogishi 120p").
+    Mơ hồ vẫn phải từ chối (bug thật: gõ sai 1 chữ là bot hỏi lại đúng thứ vừa mời)."""
+    from app import matching
+    shops = [{"id": 1, "name": "Cửa hàng Morioka"}, {"id": 2, "name": "Cửa hàng Sendai"},
+             {"id": 3, "name": "Cửa hàng Tokyo Shibuya"}]
+    courses = [{"id": 14, "name": "Momihogushi 30"}, {"id": 15, "name": "Momihogushi 60"},
+               {"id": 17, "name": "Momihogushi 120"}, {"id": 18, "name": "Dry Head Spa"}]
+
+    def name(items, q):
+        hit = matching.pick_unique(q, items)
+        return hit["name"] if hit else None
+
+    check(name(shops, "Shibuya đi") == "Cửa hàng Tokyo Shibuya", "khớp theo TỪ, bỏ chữ thừa")
+    check(name(shops, "cho tôi Sendai nhé") == "Cửa hàng Sendai", "chữ thừa hai đầu vẫn khớp")
+    check(name(courses, "Momihogishi 120p") == "Momihogushi 120", "gõ sai 1 chữ vẫn ra đúng mức")
+    # Guard cũ phải còn nguyên: mơ hồ thì KHÔNG đoán bừa.
+    check(name(shops, "cửa hàng") is None, "'cửa hàng' trúng mọi tên -> hỏi lại")
+    check(name(shops, "a") is None and name(shops, "To") is None, "query quá ngắn -> không đoán")
+    check(name(courses, "momihogushi") is None, "thiếu số phút -> mơ hồ giữa 4 mức, hỏi lại")
+
+
+def test_pick_by_index_selects_from_numbered_list():
+    """Danh sách đọc ra có đánh số -> khách gõ số phải chọn được (gói và add-on)."""
+    from app import matching
+    courses = [{"id": 14, "name": "A"}, {"id": 15, "name": "B"}, {"id": 17, "name": "C"}]
+    check(matching.pick_by_index("2", courses)["id"] == 15, "số trần")
+    check(matching.pick_by_index("gói 3", courses)["id"] == 17, "có chữ dẫn")
+    check(matching.pick_by_index("9", courses) is None, "ngoài phạm vi -> None")
+    check(matching.pick_by_index("abc", courses) is None, "không phải số -> None")
+
+    # Add-on: chọn NHIỀU bằng số trong một câu.
+    ses = Session(conversation_id="c", turn_count=1,
+                  slots=Slots(shop_id=1, date="d", party_size=2, course_id=3))
+    ses.slots.addon_texts = ["1 với 2"]
+    check(Orchestrator._match_addons(ses, _STUB_ADDONS) is True, "chọn add-on bằng số")
+    check(ses.slots.addon_ids == [7, 8], f"nhận cả hai theo số, đang {ses.slots.addon_ids}")
+
+
+def test_addon_prompt_numbered_like_courses():
+    """Add-on trình bày GIỐNG danh sách gói: mỗi dòng một mục, có số và có GIÁ."""
+    from app import nlg
+    from app.session import Session as Ses, Slots as Sl
+    ar = {"addons": [
+        {"id": 7, "name": "Ashitsubo", "duration_min": 15, "price": 1200,
+         "restricted_course_ids": []},
+        {"id": 8, "name": "Hot Stone", "duration_min": 15, "price": 1000,
+         "restricted_course_ids": []},
+    ]}
+    out = nlg.generate(nlg.build_prompt("ADDON", Ses(conversation_id="c",
+                                                    slots=Sl(party_size=1, course_id=3)), ar), None)
+    check("1. Ashitsubo · 15 phút · 1200¥" in out, "dòng 1 có số + thời lượng + giá")
+    check("2. Hot Stone · 15 phút · 1000¥" in out, "dòng 2 đánh số tiếp")
+    check("số thứ tự" in out, "nói rõ có thể trả lời bằng số")
+    check("chọn nhiều" in out, "nói rõ chọn được nhiều dịch vụ")
+    check("tất cả" in out, "nói rõ có thể lấy hết")
+
+
+def test_change_shop_midflow_clears_shop_catalog():
+    """Đòi đổi cửa hàng giữa chừng -> bỏ shop + mọi id thuộc catalog shop cũ (gói/add-on/
+    giờ), NHƯNG giữ ngày, số người và liên hệ."""
+    api = StubApi()
+    orch = _orch(api)
+    _drive(orch, "cs", "", "Shop A", _FUTURE_DATE, "2 người", "Toàn thân", "Foot")
+    before = orch.store.load("cs").slots
+    check(before.shop_id == 1 and before.course_id == 3 and before.addon_ids == [7],
+          "đã chọn xong shop/gói/add-on")
+    r = orch.handle_turn("cs", "Cho tôi đổi cửa hàng khác đi")
+    s = orch.store.load("cs").slots
+    check(s.shop_id is None and s.course_id is None and s.addon_ids == [],
+          "dọn sạch shop + catalog của shop cũ")
+    check(s.date == _FUTURE_DATE and s.party_size == 2,
+          "GIỮ ngày và số người — chúng không phụ thuộc cửa hàng")
+    check(r.state == S.SHOP, f"quay lại bước chọn cửa hàng, đang {r.state}")
+
+
+def test_fuzzy_match_ignores_common_prefix():
+    """Gõ sai tên cửa hàng vẫn khớp. Phần chung "Cửa hàng " có ở MỌI tên nên nó pha loãng
+    điểm giống nhau — phải so cả với phần đặc trưng ("morika" vs "morioka" = 0.92, trong
+    khi vs "cửa hàng morioka" chỉ 0.55, trượt ngưỡng)."""
+    from app import matching
+    shops = [{"id": 1, "name": "Cửa hàng Morioka"}, {"id": 2, "name": "Cửa hàng Sendai"},
+             {"id": 3, "name": "Cửa hàng Tokyo Shibuya"}, {"id": 5, "name": "Cửa hàng ABC"}]
+    for typo, want in (("Morika", 1), ("Sendei", 2), ("Shibuya", 3)):
+        hit = matching.pick_unique(typo, shops)
+        check(hit is not None and hit["id"] == want, f"{typo!r} phải ra shop {want}")
+    check(matching.pick_unique("cửa hàng", shops) is None,
+          "phần chung vẫn phải mơ hồ, không được khớp mờ bừa")
+
+
+def test_shops_open_without_time_answers_by_day():
+    """"Cửa hàng nào đang mở hôm nay?" là hỏi theo NGÀY — không được hỏi ngược 'khung giờ
+    nào ạ?' (né câu hỏi)."""
+    api = StubApi()
+    orch = _orch(api)
+    orch.handle_turn("cd1", "")
+    r = orch.handle_turn("cd1", "Cửa hàng nào đang mở cửa hôm nay vậy ?")
+    check("khung giờ nào" not in r.reply_text, "không được hỏi ngược về giờ")
+    check("Shop A" in r.reply_text and "Cửa hàng Sendai" in r.reply_text,
+          "đọc các cửa hàng có làm trong ngày")
+
+
+def test_shops_list_question():
+    """"Bên mình có các cửa hàng nào?" — câu cơ bản nhất, trước đây rơi vào 'chưa hỗ trợ'."""
+    api = StubApi()
+    orch = _orch(api)
+    orch.handle_turn("cd2", "")
+    r = orch.handle_turn("cd2", "Bạn đang có các cửa hàng nào ?")
+    check("chưa hỗ trợ" not in r.reply_text, "phải trả lời được")
+    check("Shop A" in r.reply_text and "Cửa hàng Sendai" in r.reply_text, "đọc đủ cửa hàng")
+
+    # LLM gán question_type=other cho chính câu này -> lưới cứu bằng luật phải bắt lại được.
+    orch2 = Orchestrator(InMemorySessionStore(), StubApi(), _OtherQuestionLLM(), _settings())
+    orch2.handle_turn("cd3", "")
+    r2 = orch2.handle_turn("cd3", "Bạn đang có các cửa hàng nào ?")
+    check("Shop A" in r2.reply_text, "qt=other nhưng luật nhận ra -> vẫn trả lời")
+
+
+def test_shops_by_staff_filters_by_gender_and_count():
+    """"Cửa hàng nào có 2 nữ phục vụ?" — lọc theo SỐ nhân viên + GIỚI TÍNH.
+    (Stub: Shop A 1 nữ; Cửa hàng Sendai 2 nữ + 1 nam.)"""
+    api = StubApi()
+    orch = _orch(api)
+    orch.handle_turn("cst1", "")
+    r = orch.handle_turn("cst1", "Cửa hàng nào có 2 nữ phục vụ ?")
+    check("Cửa hàng Sendai" in r.reply_text, "shop đủ 2 nữ phải được nêu")
+    check("Shop A" not in r.reply_text, "shop chỉ 1 nữ KHÔNG được nêu")
+    check(orch.store.load("cst1").slots.shop_id == 2, "khớp duy nhất -> điền luôn ô cửa hàng")
+
+    # Không đủ -> nói rõ nơi nhiều nhất, đừng để khách tự mò.
+    orch2 = _orch(StubApi())
+    orch2.handle_turn("cst2", "")
+    r2 = orch2.handle_turn("cst2", "Shop nào có 5 nhân viên nam trực ?")
+    check("chưa cửa hàng nào đủ" in r2.reply_text, "báo rõ không đủ")
+    check("Cửa hàng Sendai với 1 người" in r2.reply_text, "nêu nơi nhiều nhất kèm số thật")
+
+
+def test_staff_question_not_mistaken_for_handoff():
+    """Chữ "nhân viên" xuất hiện ở CẢ hai loại câu. Hỏi thông tin không được đẩy sang
+    handoff (bug thật: bot mời gọi điện khi khách hỏi số nhân viên trực)."""
+    from app import nlu
+    hoi = nlu._rule_based("Cửa hàng nào có 2 nhân viên nam trực ngày 27/8 ?")
+    check(hoi["intent"] == "ask_info" and hoi["question_type"] == "shops_by_staff",
+          "hỏi số nhân viên -> tra cứu, không phải handoff")
+    check(nlu._rule_based("cho tôi gặp nhân viên")["intent"] == "handoff",
+          "đòi GẶP người thật thì vẫn phải là handoff")
+    check(nlu._rule_based("tôi muốn nói chuyện với người thật")["intent"] == "handoff",
+          "cách nói khác của handoff vẫn nhận ra")
+
+
+def test_request_form_counts_as_question():
+    """Khách NHỜ tra cứu thay vì đặt câu hỏi ("tôi muốn tìm cửa hàng có 3 nữ") — không có
+    dấu '?' lẫn từ để hỏi, nhưng vẫn là hỏi thông tin."""
+    from app import nlu
+    check(nlu.looks_like_question("Hiện tại tôi muốn tìm một cửa hàng có 3 nữ phục vụ") is True,
+          "dạng đề nghị vẫn tính là hỏi")
+    check(nlu.looks_like_question("Shop A") is False, "câu trả lời thường thì không")
+    check(nlu.looks_like_question("Momihogushi 120") is False, "tên gói cũng không")
+
+
+def test_intent_trail_records_every_turn():
+    """Mỗi lượt phải để lại một dấu intent — KỂ CẢ lượt không đi qua NLU (câu chào, menu
+    sửa/hủy), nếu không đọc log sẽ thấy khoảng trống không giải thích được."""
+    api = StubApi()
+    orch = _orch(api)
+    _drive(orch, "cit", "", "Shop A", _FUTURE_DATE)
+    orch.handle_turn("cit", "Bên mình có những cửa hàng nào ?")
+    trail = orch.store.load("cit").intent_trail
+    check(trail[0] == "META:chào", f"lượt mở chat vẫn có dấu, đang {trail[:1]}")
+    check("ask_info:shops_list" in trail, f"lượt hỏi thông tin ghi cả loại câu hỏi, đang {trail}")
+    check(len(trail) == 4, f"đủ 4 lượt, đang {len(trail)}")
+
+    # Sau khi đặt xong, menu sửa/hủy không qua NLU nhưng vẫn phải có dấu.
+    orch2 = _orch(StubApi())
+    _drive(orch2, "cit2", *_HAPPY)
+    orch2.handle_turn("cit2", "sửa lịch")
+    orch2.handle_turn("cit2", "đổi giờ")
+    check("META:đổi slot" in orch2.store.load("cit2").intent_trail,
+          f"nhánh menu sửa cũng ghi dấu, đang {orch2.store.load('cit2').intent_trail}")
+
+
+def test_confirm_ignored_outside_confirm_step():
+    """`confirm` là chốt chặn DUY NHẤT trước POST /bookings, mà NLU hay suy 'yes' từ câu
+    chẳng liên quan ("Tôi chọn tất cả nhé"). Lọt một lần là đặt chỗ mà khách chưa thấy
+    bản tóm tắt -> chỉ nhận khi bot ĐANG hỏi xác nhận."""
+    api = StubApi()
+    orch = _orch(api)
+    _drive(orch, "cc1", "", "Shop A", _FUTURE_DATE, "1 người", "Toàn thân")
+    orch.handle_turn("cc1", "Tôi chọn tất cả nhé")      # ở bước ADDON, NLU suy confirm=yes
+    check(orch.store.load("cc1").slots.confirm is None,
+          "confirm ngoài bước xác nhận phải bị bỏ")
+
+    # Tới đúng bước CONFIRM thì vẫn nhận bình thường.
+    r = _drive(orch, "cc1", "Foot", "ai cũng được", "14:00", "0901234567 a@b.com", "đồng ý đặt")
+    check(api.created_body is not None, "xác nhận ĐÚNG bước vẫn đặt được")
+    check(r.state == S.DONE, f"-> DONE, đang {r.state}")
+
+
+def test_silent_date_change_is_announced():
+    """Khách chỉ nhắc GIỜ ("7h tối nay") mà NLU suy luôn ra ngày -> đơn nhảy sang ngày
+    khác. Phải NÓI RA, không thì khách vẫn đinh ninh ngày cũ (bug thật trong log)."""
+    from datetime import date, timedelta
+    api = StubApi()
+    orch = _orch(api)
+    _drive(orch, "cd", "", "Shop A", _FUTURE_DATE, "1 người", "Toàn thân", "không", "ai cũng được")
+    r = orch.handle_turn("cd", "Tôi đã chọn 7h tối nay mà")
+    today = date.today()
+    check("đổi ngày" in r.reply_text, f"phải báo đã đổi ngày, đang: {r.reply_text[:80]}")
+    check(f"{today.day}/{today.month}" in r.reply_text, "nêu rõ ngày mới")
+
+    # Lần ĐẦU chọn ngày thì không có gì để "đổi" -> không được báo thừa.
+    orch2 = _orch(StubApi())
+    orch2.handle_turn("cd2", "")
+    orch2.handle_turn("cd2", "Shop A")
+    r2 = orch2.handle_turn("cd2", _FUTURE_DATE)
+    check("đổi ngày" not in r2.reply_text, "chọn ngày lần đầu không phải là đổi")
+
+
+def test_shop_with_no_shifts_routes_back_to_shop():
+    """Cửa hàng không có ca NGÀY NÀO -> mời đổi CỬA HÀNG. Bảo "chọn ngày khác" là chỉ sai
+    đường: khách đổi bao nhiêu ngày cũng vậy (bug thật với Cửa hàng ABC)."""
+    api = StubApi()
+    api.dead_shops = {2}                               # Cửa hàng Sendai không có ca nào
+    orch = _orch(api)
+    # Đặt xong ngày ở shop sống rồi mới đổi sang shop chết -> ngày CÒN nguyên nên vòng
+    # hỏi nhảy thẳng tới COURSE và đụng A1 (đúng như log thật).
+    _drive(orch, "cn", "", "Shop A", _FUTURE_DATE, "1 người", "Cho tôi đổi cửa hàng khác")
+    r = orch.handle_turn("cn", "Cửa hàng Sendai")
+    check("chọn ngày khác" not in r.reply_text, "không được bảo đổi ngày")
+    check("cửa hàng khác" in r.reply_text, "phải mời đổi cửa hàng")
+    check(r.state == S.SHOP and orch.store.load("cn").slots.shop_id is None,
+          f"quay lại bước chọn cửa hàng, đang {r.state}")
+
+
+# --------------------------------------------------------------------------- #
+#  FAQ / retrieval (hybrid BM25 + vector, RRF) — app/retrieval.py              #
+# --------------------------------------------------------------------------- #
+_FAQ_CORPUS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                           "data", "faq.md")
+
+
+def _settings_faq(**kw):
+    """Settings CÓ bật FAQ. Tách khỏi _settings() để 80 test cũ giữ nguyên hành vi
+    (corpus rỗng -> làn FAQ tắt hẳn)."""
+    base = dict(
+        shop_api_base_url="http://x/api/v1",
+        llm_base_url="", llm_api_key="", llm_model="m",
+        redis_url="", session_ttl_seconds=1800, vault_enc_key="",
+        fallback_shop_phone="", support_phone="",
+        faq_corpus_path=_FAQ_CORPUS,
+        faq_vector_cache_path="",      # không ghi cache khi test
+    )
+    base.update(kw)
+    return Settings(**base)
+
+
+def _orch_faq(api, llm=None):
+    return Orchestrator(InMemorySessionStore(), api, llm, _settings_faq())
+
+
+def test_faq_tokenize_keeps_compound_words():
+    """Tách theo khoảng trắng thuần làm vỡ từ ghép tiếng Việt -> BM25 chấm điểm sai.
+    Bigram phải có mặt thì 'đặt chỗ' mới là một đơn vị."""
+    toks = retrieval.tokenize("Tôi muốn hủy đặt chỗ")
+    check("hủy_đặt" in toks, f"phải có bigram 'hủy_đặt', có: {toks}")
+    check("hủy" in toks, "vẫn giữ unigram nội dung")
+    check("tôi" not in toks, "hư từ 'tôi' phải bị loại")
+
+
+def test_faq_bm25_prefers_exact_rare_term():
+    """Chỗ BM25 gánh phần embedding hay trượt: thuật ngữ hiếm khớp nguyên văn."""
+    chunks = retrieval.load_corpus(_FAQ_CORPUS)
+    check(len(chunks) >= 10, f"corpus phải có nhiều mục, đang {len(chunks)}")
+    idx = retrieval.BM25Index(chunks)
+    hits = idx.search("add-on đặt riêng một mình được không")
+    check(hits, "phải có kết quả")
+    check("add-on" in chunks[hits[0][0]].title.lower(),
+          f"mục đầu phải về add-on, đang {chunks[hits[0][0]].title!r}")
+
+
+def test_faq_rrf_fuse_rewards_agreement():
+    """RRF: tài liệu được CẢ HAI nhánh xếp cao phải thắng tài liệu chỉ MỘT nhánh xếp nhất.
+    Đây là lý do chọn RRF thay vì cộng điểm — không phải chuẩn hóa thang nào cả."""
+    fused = dict(retrieval.rrf_fuse([[7, 3], [9, 3]]))
+    check(fused[3] > fused[7], "3 đứng hạng 2 ở CẢ HAI nhánh -> phải trên 7 (hạng 1, một nhánh)")
+    check(fused[7] == fused[9], "7 và 9 đều hạng 1 ở đúng một nhánh -> bằng điểm")
+
+
+def test_faq_answers_policy_question():
+    """Câu hỏi chính sách — không endpoint nào trả — được tra từ data/faq.md."""
+    orch = _orch_faq(StubApi())
+    _drive(orch, "fq1", "", "Shop A")
+    r = orch.handle_turn("fq1", "Tôi muốn hủy lịch thì có mất phí không ạ?")
+    check("chưa hỗ trợ" not in r.reply_text, f"không được bó tay: {r.reply_text!r}")
+    check("1 tiếng" in r.reply_text, f"phải nêu quy định 1 tiếng (BR-16): {r.reply_text!r}")
+
+
+def test_faq_answers_group_limit():
+    """Thêm câu hỏi mới = thêm mục markdown, không đụng _detect_question — nghiệm thu ý đó."""
+    orch = _orch_faq(StubApi())
+    _drive(orch, "fq2", "", "Shop A")
+    r = orch.handle_turn("fq2", "Bên mình đặt được tối đa mấy người một lần vậy?")
+    check("3 người" in r.reply_text, f"phải nêu tối đa 3 người (BR-14): {r.reply_text!r}")
+
+
+def test_faq_rejects_offtopic_instead_of_guessing():
+    """CHỐT QUAN TRỌNG: BM25 trả điểm dương cho bất kỳ chunk nào chung một token, nên
+    không có ngưỡng độ phủ thì câu lạc đề vẫn moi ra một mục FAQ và bot trả lời tự tin
+    nhưng sai. Thà xin lỗi còn hơn."""
+    orch = _orch_faq(StubApi())
+    _drive(orch, "fq3", "", "Shop A")
+    for q in ("Bên mình có chỗ đỗ xe không ạ?", "Có wifi không ạ?"):
+        r = orch.handle_turn("fq3", q)
+        check("chưa hỗ trợ" in r.reply_text, f"{q!r} phải bị từ chối, đang: {r.reply_text!r}")
+
+
+def test_faq_does_not_touch_the_form():
+    """Làn QUERY là CHỈ ĐỌC: trả lời xong thì state và tờ đơn phải nguyên vẹn."""
+    orch = _orch_faq(StubApi())
+    _drive(orch, "fq4", "", "Shop A", _FUTURE_DATE)
+    before = asdict(orch.store.load("fq4").slots)
+    state_before = orch.store.load("fq4").state
+    orch.handle_turn("fq4", "Đổi lịch sau khi đặt có được không ạ?")
+    after = orch.store.load("fq4")
+    check(asdict(after.slots) == before, "FAQ không được ghi vào tờ đơn")
+    check(after.state == state_before, f"state phải giữ nguyên {state_before}, đang {after.state}")
+
+
+def test_faq_query_is_masked_before_retrieval():
+    """Bật nhánh vector là câu truy vấn bay sang nhà cung cấp embedding. PII phải đã
+    thành placeholder TRƯỚC khi tới retriever."""
+    seen = []
+
+    class _SpyRetriever:
+        chunks = [retrieval.Chunk(id="x", title="t", text="t", tokens=["t"])]
+
+        def search(self, query, top_k=1):
+            seen.append(query)
+            return []
+
+    orch = _orch_faq(StubApi())
+    faq.configure(_SpyRetriever())
+    try:
+        _drive(orch, "fq5", "", "Shop A")
+        orch.handle_turn("fq5", "Số tôi là 0901234567, có chỗ đỗ xe không ạ?")
+    finally:
+        faq.configure(retrieval.build_retriever(_settings_faq()))
+    check(seen, "retriever phải được gọi")
+    check("0901234567" not in seen[0], f"SĐT LỌT RA retriever: {seen[0]!r}")
+    check("{{phone_" in seen[0], f"phải thấy placeholder: {seen[0]!r}")
+
+
+def test_faq_off_when_no_corpus():
+    """Corpus rỗng -> làn FAQ tắt hẳn, hành vi y như trước khi có module này: LLM gán
+    'other' thì bot xin lỗi, KHÔNG lôi văn bản nào ra trả."""
+    orch = Orchestrator(InMemorySessionStore(), StubApi(), _OtherQuestionLLM(), _settings())
+    _drive(orch, "fq6", "", "Shop A")
+    r = orch.handle_turn("fq6", "Tôi muốn hủy lịch thì có mất phí không ạ?")
+    check("chưa hỗ trợ" in r.reply_text, f"phải xin lỗi như cũ: {r.reply_text!r}")
+    check("1 tiếng" not in r.reply_text, "corpus tắt thì không được trả lời từ FAQ")
+
+
+def test_faq_does_not_steal_live_data_questions():
+    """Câu hỏi có DỮ LIỆU SỐNG (giờ mở cửa, giá) phải tiếp tục đi qua shop_api, không
+    được rơi vào văn bản tĩnh — corpus không bao giờ đúng với lịch thay đổi từng ngày."""
+    api = StubApi()
+    orch = _orch_faq(api)
+    _drive(orch, "fq7", "", "Shop A")
+    r = orch.handle_turn("fq7", "Cửa hàng nào còn mở lúc 19:00 hôm nay?")
+    check("1 tiếng" not in r.reply_text, f"không được trả bằng FAQ: {r.reply_text!r}")
+    check("chưa hỗ trợ" not in r.reply_text, f"phải trả lời được qua API: {r.reply_text!r}")
+
 
 
 def run_all():

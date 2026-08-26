@@ -35,9 +35,10 @@ export function ReschedulePanel({
   const courseId = booking.course?.id ?? null;
 
   /**
-   * GET /slots nhận MỘT bộ addon_ids áp cho mọi người, còn booking giữ add-on
-   * riêng từng người → gửi hợp để thời lượng ước tính ≥ thực tế, thà thiếu slot
-   * còn hơn gợi ý giờ rồi ăn 409 (giống bước 2 của wizard).
+   * Từ khi BR-10 cập nhật, booking MỚI có add-on giống nhau cho cả nhóm — nhưng đây là
+   * màn đọc booking ĐÃ CÓ, và booking cũ trong DB vẫn có thể khác nhau giữa các người.
+   * Nên vẫn gửi HỢP của mọi reservation cho GET /slots: thời lượng ước tính ≥ thực tế,
+   * thà thiếu slot còn hơn gợi ý giờ rồi ăn 409.
    */
   const addonUnion = useMemo(
     () =>

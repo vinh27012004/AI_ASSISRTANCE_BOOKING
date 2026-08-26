@@ -59,7 +59,7 @@ export function StepConfirm({
   startTime,
   partySize,
   courseId,
-  guestAddons,
+  addonIds,
   therapistGender,
   therapist,
   phone,
@@ -75,7 +75,7 @@ export function StepConfirm({
   startTime: string;
   partySize: PartySize;
   courseId: number;
-  guestAddons: number[][];
+  addonIds: number[];
   therapistGender: Gender | null;
   therapist: Therapist | null;
   phone: string;
@@ -95,25 +95,20 @@ export function StepConfirm({
     [services.addons],
   );
 
-  const guestAddonList = guestAddons.map((ids) =>
-    ids.map((id) => addonById.get(id)).filter((addon) => addon !== undefined),
-  );
+  // BR-10: cả nhóm cùng course + cùng add-on -> một danh sách, mọi người như nhau.
+  const addonList = addonIds
+    .map((id) => addonById.get(id))
+    .filter((addon) => addon !== undefined);
 
   const maxDuration = course
-    ? Math.max(
-        ...guestAddonList.map(
-          (list) =>
-            course.duration_min +
-            list.reduce((sum, addon) => sum + addon.duration_min, 0),
-        ),
-      )
+    ? course.duration_min +
+      addonList.reduce((sum, addon) => sum + addon.duration_min, 0)
     : 0;
 
   const totalPrice = course
-    ? course.price * partySize +
-      guestAddonList
-        .flat()
-        .reduce((sum, addon) => sum + addon.price, 0)
+    ? (course.price +
+        addonList.reduce((sum, addon) => sum + addon.price, 0)) *
+      partySize
     : 0;
 
   const payload = useMemo<BookingCreateRequest>(
@@ -125,7 +120,10 @@ export function StepConfirm({
       phone,
       email,
       course_id: courseId,
-      reservations: guestAddons.map((addon_ids) => ({ addon_ids })),
+      // API vẫn nhận add-on theo TỪNG người; cả nhóm dùng chung nên gửi lặp lại một bộ.
+      reservations: Array.from({ length: partySize }, () => ({
+        addon_ids: addonIds,
+      })),
       // BR-04: nhóm ≥2 không gửi chỉ định. BE cấm gửi cả id lẫn gender, nên
       // đích danh được ưu tiên và gender bị bỏ khi đã chọn người.
       therapist_id: partySize === 1 ? (therapist?.id ?? null) : null,
@@ -140,7 +138,7 @@ export function StepConfirm({
       phone,
       email,
       courseId,
-      guestAddons,
+      addonIds,
       therapistGender,
       therapist,
     ],
@@ -229,28 +227,27 @@ export function StepConfirm({
           </div>
         </Row>
 
-        {guestAddonList.map((list, index) => (
-          <Row
-            key={index}
-            label={partySize > 1 ? `Thêm — người ${index + 1}` : "Dịch vụ thêm"}
-          >
-            <div className="flex items-start justify-between gap-2">
-              <span>
-                {list.length === 0 ? (
-                  <span className="text-ink-3">— không</span>
-                ) : (
-                  list
-                    .map(
-                      (addon) =>
-                        `${addon.name} ${addon.duration_min}p +${formatYen(addon.price)}`,
-                    )
-                    .join(" · ")
-                )}
-              </span>
-              <EditLink onClick={() => onEditStep(2)} />
-            </div>
-          </Row>
-        ))}
+        <Row
+          label={
+            partySize > 1 ? `Dịch vụ thêm — cả ${partySize} người` : "Dịch vụ thêm"
+          }
+        >
+          <div className="flex items-start justify-between gap-2">
+            <span>
+              {addonList.length === 0 ? (
+                <span className="text-ink-3">— không</span>
+              ) : (
+                addonList
+                  .map(
+                    (addon) =>
+                      `${addon.name} ${addon.duration_min}p +${formatYen(addon.price)}`,
+                  )
+                  .join(" · ")
+              )}
+            </span>
+            <EditLink onClick={() => onEditStep(2)} />
+          </div>
+        </Row>
 
         <Row label="Nhân viên">
           <div className="flex items-start justify-between gap-2">

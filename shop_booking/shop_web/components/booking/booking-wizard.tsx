@@ -20,8 +20,8 @@ import { StepSuccess } from "./step-success";
 
 export type PartySize = 1 | 2 | 3;
 
-const emptyAddons = (partySize: number): number[][] =>
-  Array.from({ length: partySize }, () => []);
+// BR-10 (BA cập nhật): cả nhóm dùng CHUNG course và add-on -> MỘT danh sách duy nhất,
+// lặp lại cho từng reservation lúc gửi POST /bookings (xem step-confirm).
 
 export function BookingWizard() {
   const [step, setStep] = useState(1);
@@ -33,7 +33,7 @@ export function BookingWizard() {
 
   // --- Bước 2
   const [courseId, setCourseId] = useState<number | null>(null);
-  const [guestAddons, setGuestAddons] = useState<number[][]>(() => emptyAddons(1));
+  const [addonIds, setAddonIds] = useState<number[]>([]);
   // BE chỉ nhận MỘT trong hai: giới tính hoặc người đích danh. Giữ hai state
   // riêng nhưng mọi setter bên dưới luôn xoá cái còn lại.
   const [therapistGender, setTherapistGender] = useState<Gender | null>(null);
@@ -81,10 +81,10 @@ export function BookingWizard() {
     [availability.data],
   );
 
-  /** Đổi shop/ngày/số người thì mọi lựa chọn dịch vụ + giờ không còn tin được. */
-  const resetServiceChoices = (nextPartySize: number = partySize) => {
+  /** Đổi shop/ngày thì mọi lựa chọn dịch vụ + giờ không còn tin được. */
+  const resetServiceChoices = () => {
     setCourseId(null);
-    setGuestAddons(emptyAddons(nextPartySize));
+    setAddonIds([]);
     setTherapistGender(null);
     setTherapist(null);
     setNoPreference(false);
@@ -118,8 +118,8 @@ export function BookingWizard() {
   const selectPartySize = (next: PartySize) => {
     if (next === partySize) return;
     setPartySize(next);
-    // Giữ course đã chọn — chỉ add-on theo từng người và giờ là phải tính lại.
-    setGuestAddons(emptyAddons(next));
+    // Giữ course VÀ add-on: từ khi cả nhóm dùng chung một bộ add-on (BR-10, BA cập nhật),
+    // add-on không còn phụ thuộc số người. Chỉ giờ là phải chọn lại (thời lượng đổi).
     setStartTime(null);
     // BR-04: nhóm từ 2 người không được chỉ định nhân viên.
     if (next >= 2) {
@@ -163,7 +163,7 @@ export function BookingWizard() {
   const selectCourse = (next: number) => {
     if (next === courseId) return;
     setCourseId(next);
-    setGuestAddons(emptyAddons(partySize));
+    setAddonIds([]);          // BR-09: combo cấm đổi theo course -> chọn lại add-on
     setStartTime(null);
   };
 
@@ -173,7 +173,7 @@ export function BookingWizard() {
     setDate(null);
     setPartySize(1);
     setCourseId(null);
-    setGuestAddons(emptyAddons(1));
+    setAddonIds([]);
     setTherapistGender(null);
     setTherapist(null);
     setNoPreference(false);
@@ -221,13 +221,13 @@ export function BookingWizard() {
             partySize={partySize}
             services={services}
             courseId={courseId}
-            guestAddons={guestAddons}
+            addonIds={addonIds}
             therapistGender={therapistGender}
             therapist={therapist}
             noPreference={noPreference}
             startTime={startTime}
             onSelectCourse={selectCourse}
-            onChangeGuestAddons={setGuestAddons}
+            onChangeAddonIds={setAddonIds}
             onSelectTherapistGender={selectTherapistGender}
             onSelectNoPreference={selectNoPreference}
             onSelectTherapist={selectTherapist}
@@ -265,7 +265,7 @@ export function BookingWizard() {
             startTime={startTime}
             partySize={partySize}
             courseId={courseId}
-            guestAddons={guestAddons}
+            addonIds={addonIds}
             therapistGender={therapistGender}
             therapist={therapist}
             phone={phone}

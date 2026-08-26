@@ -24,6 +24,14 @@ def _load_dotenv() -> None:
             os.environ.setdefault(key.strip(), val.strip())
 
 
+def _data_dir() -> str:
+    return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
+
+
+def _default_faq_path() -> str:
+    return os.path.join(_data_dir(), "faq.md")
+
+
 @dataclass(frozen=True)
 class Settings:
     shop_api_base_url: str
@@ -41,6 +49,14 @@ class Settings:
     # Mức log ('DEBUG'/'INFO'/'WARNING'...) — xem app/shop_api_client.py: mọi lời gọi
     # shop_api được log ở đây để soi dữ liệu sai (BE trả sai hay chatbot xử lý sai).
     log_level: str = "INFO"
+    # --- FAQ / retrieval (app/retrieval.py). Corpus rỗng -> làn FAQ tắt hẳn, phần còn
+    # lại chạy y như cũ. Embedding rỗng -> BM25-only, vẫn dùng được và vẫn test offline
+    # được (cùng nguyên tắc use_real_llm / use_redis ở dưới).
+    faq_corpus_path: str = ""
+    faq_vector_cache_path: str = ""
+    embedding_base_url: str = ""
+    embedding_api_key: str = ""
+    embedding_model: str = ""
 
     @property
     def use_real_llm(self) -> bool:
@@ -50,6 +66,12 @@ class Settings:
     @property
     def use_redis(self) -> bool:
         return bool(self.redis_url)
+
+    @property
+    def use_embeddings(self) -> bool:
+        # Thiếu bất kỳ mảnh nào -> hybrid tắt, retrieval lùi về BM25 thuần stdlib.
+        return bool(self.embedding_base_url and self.embedding_api_key
+                    and self.embedding_model)
 
 
 def load_settings() -> Settings:
@@ -66,4 +88,12 @@ def load_settings() -> Settings:
         # SUPPORT_PHONE riêng; chưa đặt thì lấy FALLBACK_SHOP_PHONE (số env sẵn có).
         support_phone=os.environ.get("SUPPORT_PHONE", os.environ.get("FALLBACK_SHOP_PHONE", "")),
         log_level=os.environ.get("LOG_LEVEL", "INFO"),
+        # Mặc định trỏ vào data/faq.md cạnh service -> cài xong là FAQ chạy luôn, không
+        # phải khai báo gì. Đặt FAQ_CORPUS_PATH= (rỗng) để tắt.
+        faq_corpus_path=os.environ.get("FAQ_CORPUS_PATH", _default_faq_path()),
+        faq_vector_cache_path=os.environ.get(
+            "FAQ_VECTOR_CACHE_PATH", os.path.join(_data_dir(), "faq_vectors.json")),
+        embedding_base_url=os.environ.get("EMBEDDING_BASE_URL", "").rstrip("/"),
+        embedding_api_key=os.environ.get("EMBEDDING_API_KEY", ""),
+        embedding_model=os.environ.get("EMBEDDING_MODEL", ""),
     )

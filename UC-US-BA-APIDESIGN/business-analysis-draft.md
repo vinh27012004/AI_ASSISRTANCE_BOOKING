@@ -60,7 +60,7 @@
 - `party_size` — số người (tối đa 3 — BR-14)
 - `phone` — số điện thoại khách đặt
 - `booking_code` — mã đặt chỗ (BE sinh sau khi tạo thành công)
-- Danh sách Reservation (nhóm ≥2: tất cả cùng course — BR-10)
+- Danh sách Reservation (nhóm ≥2: tất cả cùng course và cùng add-on — BR-10)
 
 ### Reservation (mỗi người)
 - `main_course_id` — course chính (bắt buộc)
@@ -86,7 +86,7 @@
 | BR-07 | Slot khả dụng phụ thuộc shop + ngày + dịch vụ (thời lượng) + số người + therapist. |
 | BR-08 | Slot có thể hết theo thời gian thực → phải xử lý conflict sau khi khách confirm (gợi ý giờ gần nhất còn trống). |
 | BR-09 | Một số tổ hợp course + add-on không được phép kết hợp (bảng combo_restriction do hệ thống định nghĩa) → yêu cầu khách chọn lại. |
-| BR-10 | Booking nhóm = nhiều reservation liên kết, **cùng giờ, cùng course chính** (add-on được chọn riêng từng người), mỗi người một slot. |
+| BR-10 | Booking nhóm = nhiều reservation liên kết, **cùng giờ, cùng course chính, cùng add-on**, mỗi người một slot. (Cập nhật: trước đây add-on được chọn riêng từng người; nay cả nhóm dùng chung một bộ add-on.) |
 | BR-11 | Dữ liệu tách biệt theo shop: dịch vụ, lịch, therapist không dùng chung giữa các cửa hàng. |
 | BR-12 | Booking chỉ hợp lệ khi BE tạo thành công và sinh mã đặt chỗ; lỗi hệ thống → báo lỗi, cho khách thử lại. |
 | BR-13 | Booking sau khi tạo **có thể hủy hoặc sửa** (qua FE; sau này thêm kênh AI chatbot). |
@@ -188,6 +188,6 @@ Slot thay đổi thời gian thực; giữa lúc khách chọn và lúc confirm 
 5. Combo bị cấm: **chưa có data — mentor cung cấp sau.** Bảng combo_restriction để sẵn, có data thì seed; tạm thời mọi combo đều hợp lệ.
 5b. ~~Xác thực sửa/hủy?~~ → **Đã chốt: xác thực qua email, mã đặt chỗ gửi qua email, vẫn thu SĐT (BR-15).**
 6. ~~Rank ảnh hưởng gì?~~ → **Đã chốt: chỉ để hiển thị (BR-20).** NG list có hiển thị lý do cấm.
-7. ~~Booking nhóm: "cùng dịch vụ" hay mỗi người chọn riêng?~~ → **Đã chốt với mentor: nhóm ≥2 người phải cùng course, tối đa 3 người (BR-10, BR-14).**
-8. ~~Add-on trong nhóm có bắt buộc giống nhau không?~~ → **Đã chốt: cùng course chính nhưng add-on mỗi người chọn riêng.**
+7. ~~Booking nhóm: "cùng dịch vụ" hay mỗi người chọn riêng?~~ → **Đã chốt với mentor: nhóm ≥2 người phải cùng course, tối đa 3 người (BR-10, BR-14).** Cập nhật sau: **add-on cũng dùng chung cho cả nhóm** (trước đây cho chọn riêng từng người).
+8. ~~Add-on trong nhóm có bắt buộc giống nhau không?~~ → **Đã chốt lại: CÓ — cả nhóm dùng chung một bộ add-on** (chốt cũ cho phép mỗi người chọn riêng, nay bỏ).
 9. ~~Nhóm >3 người?~~ → **Đã chốt: hướng dẫn khách liên hệ cửa hàng trực tiếp (BR-14).**

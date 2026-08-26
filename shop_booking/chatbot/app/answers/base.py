@@ -23,6 +23,9 @@ class QueryCtx:
     # Câu gốc (đã mask PII). Chỉ dùng để khớp khu vực khi NLU không trích được `location`
     # — nhánh rule-based offline không biết tên địa danh nên hay để trống.
     raw_text: str = ""
+    # Danh sách shop_id của câu trả lời TRƯỚC. Cho phép khách hỏi tiếp kiểu "trong 2 cửa
+    # hàng đó cái nào có nhân viên nữ" mà không phải nhắc lại tên.
+    shortlist: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -30,6 +33,8 @@ class Answer:
     text: str = ""                      # câu trả lời soạn TẤT ĐỊNH (chứa số liệu THẬT)
     resolved: bool = True               # False -> bot xin lỗi + hỏi lại câu đang dở
     suggest: dict = field(default_factory=dict)   # entity dạng NLU -> merge_params
+    # shop_id mà câu trả lời này nêu ra — orchestrator ghi lại làm ngữ cảnh cho lượt sau.
+    shortlist: tuple[int, ...] = ()
 
 
 NOT_RESOLVED = Answer(resolved=False)

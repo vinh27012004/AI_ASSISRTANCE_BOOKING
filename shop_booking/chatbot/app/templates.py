@@ -36,7 +36,7 @@ INSTRUCTION = {
     "PARTY_SIZE": "Hỏi đặt cho mấy người, nhắc tối đa 3 người mỗi lượt.",
     "COURSE": "Hỏi khách chọn gói dịch vụ chính, ĐỌC RÕ danh sách gói trong facts (mỗi gói đã kèm sẵn thời lượng).",
     "ADDON": "(Render TẤT ĐỊNH — soạn ở nlg._addon_prompt_line, không qua LLM.) Hỏi add-on MỘT lần cho cả nhóm (BR-10), đọc rõ danh sách, cho chọn NHIỀU, và cho khách nói 'không' để bỏ qua.",
-    "SLOT": "Mời khách chọn khung giờ, ĐỌC RÕ các giờ còn trống trong facts; khách nói giờ mong muốn là được.",
+    "SLOT": "Mời khách chọn khung giờ, NÊU RÕ NGÀY và ĐỌC RÕ các giờ còn trống trong facts; khách nói giờ mong muốn là được.",
     "THERAPIST": "Hỏi khách có muốn chỉ định nhân viên (nêu tên nhân viên đang trực trong facts, hoặc theo giới tính) hay để cửa hàng sắp.",
     "CONTACT": "Xin thông tin liên hệ CÒN THIẾU (đúng theo facts.hoi) để giữ chỗ và gửi mã đặt chỗ. Nếu khách đã cho số điện thoại rồi thì CHỈ hỏi email, đừng hỏi lại số.",
     "CONFIRM": "Đọc lại toàn bộ thông tin đơn và xin khách xác nhận.",
@@ -62,7 +62,7 @@ FAKE = {
     # Câu soạn động trong nlg._addon_prompt_line (đọc danh sách add-on + cho nói 'không').
     # ADDON ở _LITERAL_SAFE_KEYS nên luôn dùng câu này, không qua LLM.
     "ADDON": "{addon_line}",
-    "SLOT": "{gio_het}Các khung giờ còn trống: {slots}. Anh/chị chọn giờ nào ạ?",
+    "SLOT": "{gio_het}{ngay}các khung giờ còn trống: {slots}. Anh/chị chọn giờ nào ạ?",
     "THERAPIST": "Anh/chị có muốn chỉ định nhân viên không ạ? {nhan_vien_list}"
                  "Anh/chị có thể chọn theo tên, theo giới tính (nam/nữ), hoặc để cửa hàng sắp giúp.",
     "CONTACT": "Anh/chị cho em xin {hoi} để giữ chỗ và gửi mã đặt chỗ ạ.",

@@ -42,12 +42,14 @@ def merge_params(session: Session, entities: dict) -> None:
             changed.add(field)
 
     shop = entities.get("shop")
-    # Chỉ nhận gợi ý shop khi CHƯA chọn — shop là gốc của mọi dữ liệu sau đó (ngày/course/
-    # slot đều theo shop), đổi giữa chừng cần invalidate dây chuyền nên chưa hỗ trợ (khác
-    # course: đổi course giữa chừng chỉ cần reset add-on/slot). Khách muốn đổi shop thì bắt
-    # đầu lại phiên mới.
-    if shop and s.shop_id is None:
+    if shop:
         s.shop_text = str(shop)         # map id qua GET /shops (orchestrator._match_shop)
+        if s.shop_id is not None:
+            # Đổi shop GIỮA CHỪNG: course/add-on/nhân viên/giờ đều thuộc về shop cũ (id
+            # không dùng lại được ở shop khác) -> bỏ hết. Giữ ngày, số người, liên hệ.
+            s.shop_id = None
+            s.shop_name = None
+            changed.add("shop_id")
 
     date = entities.get("date")
     if date:
@@ -70,12 +72,9 @@ def merge_params(session: Session, entities: dict) -> None:
                 s.party_over = False
                 _set("party_size", ps)
 
-    dur = entities.get("duration")
-    if dur is not None:
-        try:
-            _set("duration", int(dur))
-        except (TypeError, ValueError):
-            pass
+    # KHÔNG nhận `duration` từ NLU: thời lượng do COURSE quyết (orchestrator._cache_course
+    # ghi từ duration_min của gói). NLU stateless hay bịa ra 60 khi khách chỉ nói "3 người",
+    # thậm chí ghi đè 120 -> 60, làm bẩn đơn mà chẳng để làm gì.
 
     course = entities.get("course")
     if course:
@@ -114,17 +113,44 @@ def merge_params(session: Session, entities: dict) -> None:
     _invalidate(session, changed)
 
 
+def clear_shop(session: Session) -> None:
+    """Khách đòi đổi cửa hàng -> bỏ shop và MỌI thứ thuộc catalog shop cũ (course/add-on/
+    nhân viên/giờ đều mang id riêng của shop), quay lại bước chọn cửa hàng. Giữ ngày, số
+    người và thông tin liên hệ vì chúng không phụ thuộc cửa hàng."""
+    s = session.slots
+    s.shop_id = None
+    s.shop_name = None
+    s.shop_text = None
+    _invalidate(session, {"shop_id"})
+
+
 def _invalidate(session: Session, changed: set[str]) -> None:
     """XÓA slot không còn chắc hợp lệ sau khi đổi điều kiện (§3.3)."""
     s = session.slots
+    # Đổi cửa hàng -> mọi id thuộc catalog cửa hàng cũ đều vô nghĩa.
+    if "shop_id" in changed:
+        s.course_id = None
+        s.course_name = None
+        s.therapist_id = None
+        s.therapist_gender = None
+        s.therapist_decided = False
+        s.slot = None
+        s.confirm = None
+        reset_addons(s)
     # BR-04: nhóm >1 không được chỉ định therapist.
     if "party_size" in changed and (s.party_size or 0) > 1:
         s.therapist_id = None
         s.therapist_gender = None
         s.therapist_decided = False
-    # Đổi course (add-on cũ chưa chắc còn kèm được — BR-09) hoặc đổi số người (cấu trúc
-    # add-on theo từng người thay đổi) -> chọn lại add-on từ đầu.
-    if changed & {"course_id", "party_size"}:
+    # Ngược lại: hạ xuống 1 người thì bước THERAPIST mở ra. Nếu đơn ĐÃ đi sâu (qua được
+    # lookup liên hệ) thì khách đang sửa chứ không đặt mới — bật ra một câu hỏi họ chưa
+    # từng được hỏi là giật. Mặc định để cửa hàng sắp, khách vẫn nói được nếu muốn.
+    if "party_size" in changed and s.party_size == 1 and s.contact_verified             and not s.therapist_decided:
+        s.therapist_decided = True
+    # Đổi course -> add-on cũ chưa chắc còn kèm được (BR-09) -> chọn lại.
+    # KHÔNG reset khi đổi SỐ NGƯỜI: từ khi cả nhóm dùng chung một bộ add-on (BR-10, BA cập
+    # nhật), add-on không còn phụ thuộc số người — bắt chọn lại là hỏi thừa.
+    if "course_id" in changed:
         reset_addons(s)
     if "course_id" in changed:
         s.course_name = None
@@ -150,11 +176,10 @@ def apply_modify_target(session: Session, target: str) -> None:
     if target == "slot":
         s.slot = None; s.confirm = None
     elif target == "party":
-        # Đổi số người -> cấu trúc add-on theo TỪNG người đổi, phải chọn lại từ đầu (BR-10);
-        # nhóm ≥2 không được chỉ định therapist (BR-04) nên bỏ luôn chỉ định.
+        # Add-on dùng chung nên KHÔNG phụ thuộc số người -> giữ nguyên. Nhóm ≥2 không được
+        # chỉ định therapist (BR-04) nên bỏ chỉ định.
         s.party_size = None; s.slot = None; s.confirm = None
         s.therapist_id = None; s.therapist_gender = None; s.therapist_decided = False
-        reset_addons(s)
     elif target == "course":
         # Đổi course -> add-on cũ chưa chắc còn kèm được (BR-09), chọn lại từ đầu.
         s.course_id = None; s.course_name = None
@@ -170,6 +195,7 @@ def skip_addons(session: Session) -> None:
     """Khách nói "không thêm gì" -> chốt luôn với danh sách rỗng."""
     s = session.slots
     s.addon_ids = []
+    s.addon_names = []
     s.addons_decided = True
 
 
@@ -177,4 +203,5 @@ def reset_addons(s) -> None:
     """Xóa lựa chọn add-on -> hỏi lại. Dùng khi đổi course (BR-09: combo cấm có thể khác)
     hoặc đổi số người, kể cả lúc sửa lịch."""
     s.addon_ids = []
+    s.addon_names = []
     s.addons_decided = False

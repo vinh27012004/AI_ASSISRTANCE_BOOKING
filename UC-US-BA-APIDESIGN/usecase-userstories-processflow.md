@@ -59,7 +59,7 @@ graph LR
 2. Khách chọn ngày
 3. Khách chọn số người (1 hoặc nhóm 2–3 người — BR-14)
 4. Khách chọn thời lượng (bội số 15 phút)
-5. Khách chọn course chính (cả nhóm dùng chung — BR-10), mỗi người tùy chọn add-on riêng
+5. Khách chọn course chính và add-on — cả nhóm dùng chung cả hai (BR-10)
 6. BE trả danh sách slot khả dụng theo các điều kiện trên (BR-07)
 7. Khách chọn giờ bắt đầu
 8. (Chỉ booking 1 người) FE hiện tùy chọn chỉ định therapist theo tên/giới tính (BR-04)
@@ -115,7 +115,7 @@ graph LR
 
 **US-03** — Là khách hàng đi theo nhóm, tôi muốn đặt cho cả nhóm trong một lần, để mọi người được phục vụ cùng giờ.
 - AC1: Một lần đặt tạo được booking cho 2–3 người, cùng giờ bắt đầu
-- AC2: Cả nhóm dùng cùng một course chính; add-on mỗi người chọn riêng (BR-10)
+- AC2: Cả nhóm dùng cùng một course chính và cùng một bộ add-on (BR-10)
 - AC3: Chỉ hiển thị các slot đủ chỗ cho cả nhóm
 - AC4: Yêu cầu >3 người bị từ chối kèm hướng dẫn (BR-14)
 
@@ -163,7 +163,7 @@ flowchart TD
     E --> E1{"Tối đa 3 người? (BR-14)"}
     E1 -- "Không (>3)" --> E2[Báo giới hạn - hướng dẫn liên hệ shop]
     E1 -- Có --> F[4. Chọn thời lượng]
-    F --> G[5. Chọn course chung + add-on riêng từng người]
+    F --> G[5. Chọn course + add-on, cả nhóm dùng chung]
     G --> H{"Combo hợp lệ? (BR-09)"}
     H -- Không --> G
     H -- Có --> I[6. BE trả danh sách slot khả dụng]
