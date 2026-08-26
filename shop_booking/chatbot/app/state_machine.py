@@ -11,6 +11,7 @@ map về id ở orchestrator (._match_*) mới dùng được.
 from __future__ import annotations
 
 from app.session import Session
+from app import matching
 from app import states as S
 
 
@@ -42,6 +43,12 @@ def merge_params(session: Session, entities: dict) -> None:
             changed.add(field)
 
     shop = entities.get("shop")
+    # NHẮC LẠI cửa hàng đang chọn không phải là đổi cửa hàng. Bug thật trong log: khách nói
+    # "Tôi chọn Hải Châu lúc 7h tối với dịch vụ tôi đã chọn" — Hải Châu đúng là shop đang chọn,
+    # vậy mà gói + add-on bị xoá sạch rồi bot hỏi lại từ đầu, ngược hẳn ý "dịch vụ đã chọn".
+    if (shop and s.shop_id is not None and s.shop_name
+            and matching.name_matches(str(shop), s.shop_name)):
+        shop = None
     if shop:
         s.shop_text = str(shop)         # map id qua GET /shops (orchestrator._match_shop)
         if s.shop_id is not None:

@@ -59,7 +59,7 @@ MUST_REJECT = [
     "shop A",
     "hôm nay mấy giờ đóng cửa",
     "gói toàn thân giá bao nhiêu",
-    "cửa hàng nào gần ga Sendai",
+    "cửa hàng nào gần Hải Châu",
     "chủ nhật này có nghỉ không",
 ]
 

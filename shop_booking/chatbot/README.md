@@ -37,7 +37,7 @@ Nhờ vậy lõi state machine + PII test được không cần mock LLM (bướ
 | `orchestrator.py` | Vòng 6 bước `handle_turn` + `run_state_action` + map error.code (§3.1/§3.6) |
 | `state_machine.py` · `states.py` | `next_state`, `merge_params`, token nút — code deterministic (§3.2/§3.3) |
 | `nlu.py` · `llm_client.py` | Bước① trích param → JSON + validate; adapter router (§3.4, Q4) |
-| `nlg.py` · `templates.py` | Bước⑤⑥ ghép template + sinh câu, đa ngôn ngữ vi/en/ja (§7) |
+| `nlg.py` · `templates.py` | Bước⑤⑥ ghép template + sinh câu — CHỈ tiếng Việt (§7) |
 | `pii.py` | Mask/unmask/mask_response + Vault (SĐT/email/mã đặt chỗ — §6, Q6) |
 | `session.py` | Session + store (TTL sliding 30', rút vault sau 2' — Q5) |
 | `shop_api_client.py` | Gọi endpoint GĐ1 như client **public** (giống FE web) — không auth kênh riêng |
@@ -61,7 +61,7 @@ câu đang dở, **không đụng `session.state` lẫn `slots`**.
   `_invalidate` (BR-04/BR-07) vẫn chạy.
 - Câu trả lời chứa số liệu thật -> key `INFO` nằm trong `_LITERAL_SAFE_KEYS`, LLM không viết lại.
 - Nghi ngờ thì ưu tiên luồng đặt lịch: KHÔNG tin một mình `question_type` của NLU (nó gán nhầm
-  "other" cho `Sendai`, "course_price" cho `Gói đầu tiên`) — câu phải có DẤU HIỆU HỎI (`?` hoặc
+  "other" cho `Hải Châu`, "course_price" cho `Gói đầu tiên`) — câu phải có DẤU HIỆU HỎI (`?` hoặc
   từ để hỏi: nào/đâu/bao nhiêu…) mới được rẽ sang làn hỏi đáp.
 - Lạc đề 3 lượt liên tiếp -> đọc số cửa hàng (`_OFFTOPIC_LIMIT`).
 
@@ -82,7 +82,7 @@ Vị trí trong luồng: khi không resolver nào nhận, `answers.resolve` giao
 
 | Nhánh | Gánh việc gì | Cần gì |
 |---|---|---|
-| BM25 | Thuật ngữ hiếm khớp nguyên văn (`momihogushi 30`, tên chi nhánh) | stdlib, offline |
+| BM25 | Thuật ngữ hiếm khớp nguyên văn (`massage body 30`, tên chi nhánh) | stdlib, offline |
 | Vector | Câu diễn đạt khác ("hủy trước bao lâu" ↔ "chính sách thay đổi") | `EMBEDDING_*` |
 
 Không cấu hình `EMBEDDING_*` → BM25-only, vẫn dùng tốt. Không dùng vector DB: corpus cỡ vài
@@ -111,10 +111,10 @@ mục tương ứng.
 
 ```
 ┌─ LƯỢT 3 · conv=demo · vào state=GREETING
-│ IN     Cửa hàng Sendai
+│ IN     Cửa hàng Hải Châu
 │ ①NLU   rule_based 0.00s · intent=book · qt=-      ← "(bỏ qua — …)" nếu nhánh không qua NLU
 │ LANE   TASK                         ← điền đơn / QUERY (hỏi) / META (chào, sửa, hủy)
-│ ②GỘP   shop_text: None→'Cửa hàng Sendai'
+│ ②GỘP   shop_text: None→'Cửa hàng Hải Châu'
 │ ③STATE GREETING → SHOP
 │ ④API   GET /shops/2/availability → 200 7ms
 │ ③STATE SHOP → DATE                  ← bước ④ khớp được tên nên đẩy tiếp
@@ -149,12 +149,12 @@ ngày + giờ → trả lại booking cũ).
 - **Bỏ bước hỏi thời lượng**: mỗi course đã kèm sẵn `duration_min` (hiện luôn trên nút).
 - **COURSE và ADDON là hai bước riêng**: chọn course chính trước, rồi chọn add-on hoặc "Không thêm".
   Cả nhóm dùng **chung** course và add-on (BR-10, BA cập nhật) — hỏi MỘT lần, không lặp theo từng
-  người. Một câu nêu nhiều add-on ("Ashitsubo với Hot Stone") nhận hết, khớp bằng
+  người. Một câu nêu nhiều add-on ("Bấm huyệt bàn chân với Đá nóng") nhận hết, khớp bằng
   `matching.pick_all` (không phải `pick_unique` — 2 tên khớp không phải là "mơ hồ" ở đây).
   Danh sách gói/add-on đọc ra đều **đánh số**, nên khách trả lời bằng số cũng nhận
   (`matching.pick_by_index`).
-- **Khớp tên hạ dần 3 tầng** (`matching.pick_unique`): chuỗi-con → theo TỪ (`"Shibuya đi"`) →
-  khớp MỜ chịu lỗi gõ (`"Momihogishi 120p"` → `Momihogushi 120`). Mơ hồ ở tầng nào cũng dừng và
+- **Khớp tên hạ dần 3 tầng** (`matching.pick_unique`): chuỗi-con → theo TỪ (`"Sài Gòn đi"`) →
+  khớp MỜ chịu lỗi gõ (`"Massge body 120"` → `Massage body 120`). Mơ hồ ở tầng nào cũng dừng và
   hỏi lại, không đoán bừa.
 - **Đổi cửa hàng giữa chừng**: bắt bằng Ý ĐỊNH (`nlu.is_change_shop_request`) vì nhánh rule-based
   không biết tên cửa hàng. `sm.clear_shop` dọn course/add-on/nhân viên/giờ (đều mang id riêng của

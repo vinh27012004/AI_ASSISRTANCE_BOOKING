@@ -14,8 +14,8 @@ import re
 
 from app.answers.base import Answer, QueryCtx
 
-# Từ không mang thông tin khu vực: hư từ tiếng Việt, chữ trong tên cửa hàng, và hậu tố
-# hành chính Nhật (shi/ku/cho...) — giữ lại thì shop nào cũng trúng.
+# Từ không mang thông tin khu vực: hư từ tiếng Việt, chữ trong tên cửa hàng, và danh từ
+# hành chính (quận/phường/đường...) — giữ lại thì shop nào cũng trúng.
 _STOPWORDS = {
     "cửa", "hàng", "cua", "hang", "shop", "quán", "quan", "chi", "nhánh", "nhanh",
     "nhà", "nha", "tôi", "toi", "em", "anh", "chị", "chi̇", "mình", "minh", "ạ", "a",
@@ -24,16 +24,17 @@ _STOPWORDS = {
     "biet", "muốn", "muon", "đặt", "dat", "lịch", "lich", "massage", "địa", "dia",
     "chỉ", "của", "cua̒", "là", "la", "với", "voi", "và", "va", "thành", "thanh",
     "phố", "pho", "tỉnh", "tinh", "quận", "quan̈", "phường", "phuong", "số", "so",
-    "shi", "ku", "cho", "ken", "fu", "to", "machi", "chome",
+    "đường", "duong", "ngõ", "ngo", "hẻm", "hem", "khu", "vực", "vuc", "huyện",
+    "huyen", "thị", "xã", "tphcm", "hcm",
 }
 
 _TOKEN_RE = re.compile(r"[0-9a-zà-ỹ]+", re.IGNORECASE)
 
 
 def _tokens(text: str) -> set[str]:
-    """Tách token khu vực: bỏ mã bưu điện 〒xxx-xxxx, tách chữ/số, bỏ hư từ và token
-    quá ngắn (≤2 ký tự trúng bừa quá nhiều)."""
-    low = re.sub(r"〒\s*\d{3}-?\d{4}", " ", (text or "").lower())
+    """Tách token khu vực: tách chữ/số, bỏ hư từ và token quá ngắn (≤2 ký tự trúng bừa
+    quá nhiều — cũng là lý do "Hà", "Đà", "Hồ" tự rụng, phải bám vào "Nội"/"Nẵng")."""
+    low = (text or "").lower()
     out = set()
     for tk in _TOKEN_RE.findall(low):
         if len(tk) > 2 and not tk.isdigit() and tk not in _STOPWORDS:

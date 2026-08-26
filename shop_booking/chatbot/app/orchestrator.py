@@ -50,6 +50,12 @@ class _AnswerApi:
     def get_timeline(self, shop_id, date):
         return self._o._get_timeline(shop_id, date)
 
+    def get_slots(self, shop_id, **kw):
+        # Tủ tra cứu cần /slots vì chỉ nó mới biết một GÓI cụ thể có nhét vừa ca làm còn
+        # lại của nhân viên hay không (ca + khoảng đã có khách). /timeline chỉ nói cửa
+        # hàng có người trực, không nói đủ chỗ cho gói dài bao nhiêu phút.
+        return self._o._get_slots(shop_id, **kw)
+
 
 @dataclass
 class BotReply:
@@ -82,6 +88,9 @@ class Orchestrator:
         # (shop_id, date) -> (epoch, data) cho GET /timeline. Câu hỏi "mở lúc mấy giờ" phải
         # dò LẦN LƯỢT từng cửa hàng nên không cache là mỗi lượt nện API n lần.
         self._timeline_cache: dict[tuple, tuple[float, dict]] = {}
+        # (shop_id, ngày, số người, course, add-on) -> (epoch, data) cho GET /slots. Chỉ
+        # làn QUERY dùng: một câu "cửa hàng nào nhận lúc 19h?" dò cả n cửa hàng.
+        self._slots_cache: dict[tuple, tuple[float, dict]] = {}
         self._answer_api = _AnswerApi(self)
         # Nạp corpus FAQ MỘT LẦN lúc khởi tạo (đọc file + dựng chỉ mục BM25 + embed corpus
         # nếu bật hybrid). Đây là chỗ duy nhất cầm Settings nên cũng là chỗ duy nhất dựng
@@ -177,7 +186,7 @@ class Orchestrator:
             turnlog.inp(masked)
             session.history.append({"role": "user", "masked_text": masked})
 
-            parsed = nlu.extract(masked, self.llm)
+            parsed = nlu.extract(masked, self.llm, self.settings.llm_timeout_nlu)
             if parsed is None:                       # sai schema -> hỏi lại (§3.4)
                 turnlog.lane("REPROMPT", "NLU không trích được gì")
                 self._note_intent(session, "?")
@@ -294,7 +303,7 @@ class Orchestrator:
         nhầm ngược lại làm hỏng cả phiên đặt. Nghi ngờ -> coi là điền đơn.
 
         KHÔNG tin một mình question_type của NLU: log thật cho thấy nó gán "other" cho
-        "Sendai" và "course_price" cho "Gói đầu tiên" — toàn là câu khách TRẢ LỜI. Phải có
+        "Hải Châu" và "course_price" cho "Gói đầu tiên" — toàn là câu khách TRẢ LỜI. Phải có
         thêm dấu hiệu hỏi trong chính câu nói."""
         qt = parsed.get("question_type")
         # Chưa có FAQ thì loại nào không có trong bảng là hết đường -> chặn ngay như cũ.
@@ -328,6 +337,10 @@ class Orchestrator:
             time_ambiguous=self._time_ambiguous(ent.get("time"), masked),
             raw_text=masked,
             shortlist=tuple(session.shop_shortlist),
+            # Gói đã chốt -> câu hỏi "cửa hàng nào mở lúc 19h?" được trả lời theo đúng
+            # nghĩa "chỗ nào nhận được gói NÀY lúc 19h", không phải "chỗ nào còn sáng đèn".
+            course_name=session.slots.course_name,
+            addon_names=tuple(session.slots.addon_names),
         )
         ans = answers.resolve(ctx, self._answer_api)
 
@@ -836,7 +849,7 @@ class Orchestrator:
     # ------------------------------------------------------------------ #
     def _reply(self, session: Session, render_key: str, api_result: dict) -> BotReply:
         prompt = nlg.build_prompt(render_key, session, api_result)
-        reply = nlg.generate(prompt, self.llm)                     # ⑥ NLG (LLM hoặc fake)
+        reply = nlg.generate(prompt, self.llm, self.settings.llm_timeout_nlg)                     # ⑥ NLG (LLM hoặc fake)
         # Ghi chú tất định ghép TRƯỚC câu trả lời (vd "đã đổi ngày") — không đi qua LLM nên
         # ngày tháng trong đó chắc chắn đúng.
         note = (api_result or {}).get("prepend_note")
@@ -874,7 +887,7 @@ class Orchestrator:
     @staticmethod
     def _match_course(session: Session, courses: list[dict]) -> bool:
         """Map course_text (gợi ý NLU) -> course_id nếu tên khớp DUY NHẤT; không khớp hay
-        mơ hồ (vd "Momihogushi" trúng cả 4 mức thời lượng) thì hỏi lại."""
+        mơ hồ (vd "Massage body" trúng cả 4 mức thời lượng) thì hỏi lại."""
         s = session.slots
         if s.course_id or not s.course_text:
             return False
@@ -882,7 +895,7 @@ class Orchestrator:
         # Danh sách đọc ra có đánh số -> khách gõ "2" là chuyện đương nhiên.
         c = matching.pick_by_index(text, courses) or _pick_unique(text, courses)
         if c is None:
-            # NLU hay XÉ số phút khỏi tên gói ("momihogushi 30" -> course='momihogushi' +
+            # NLU hay XÉ số phút khỏi tên gói ("massage body 30" -> course='massage body' +
             # duration=30), làm tên còn lại trúng cả 4 mức thời lượng -> mơ hồ -> hỏi lại
             # đúng thứ khách vừa nói. Thử lại bằng CÂU GỐC, ở đó số phút vẫn còn.
             raw = Orchestrator._last_user_text(session)
@@ -944,8 +957,8 @@ class Orchestrator:
 
     @staticmethod
     def _match_addons(session: Session, addons: list[dict]) -> bool:
-        """Map tên add-on khách đọc -> id. Nhận NHIỀU add-on trong MỘT câu ("Ashitsubo với
-        Hot Stone") — trước đây dùng _pick_unique nên câu nêu 2 tên bị coi là mơ hồ rồi bỏ
+        """Map tên add-on khách đọc -> id. Nhận NHIỀU add-on trong MỘT câu ("Bấm huyệt bàn chân với
+        Đá nóng") — trước đây dùng _pick_unique nên câu nêu 2 tên bị coi là mơ hồ rồi bỏ
         sạch, khiến chat chỉ chọn được 1 trong khi web tick được nhiều.
 
         Cả nhóm dùng CHUNG một bộ add-on (BR-10, BA cập nhật). Add-on cấm với course đang
@@ -962,28 +975,33 @@ class Orchestrator:
 
         allowed = [a for a in addons
                    if not (s.course_id and s.course_id in (a.get("restricted_course_ids") or []))]
-        if nlu.is_select_all(query):          # "cho tôi tất cả" / "lấy hết đi"
+        # `len(allowed)` để "cả 3 cái" chỉ là 'lấy hết' khi đang mời đúng 3 mục — xem
+        # nlu.is_select_all. Không truyền thì "cả 3 cái" rơi xuống nhánh số thứ tự bên
+        # dưới và thành "mục số 3": khách xin 3, hệ thống ghi 1, không báo gì.
+        if nlu.is_select_all(query, len(allowed)):     # "cho tôi tất cả" / "cả 3 cái"
             chosen = list(allowed)
         else:
             chosen = matching.pick_all(query, allowed)
-        picked = [a["id"] for a in chosen]
-        if not picked:
+        if not chosen:
             # Danh sách add-on cũng đánh số -> nhận cả "1, 3" / "số 2".
-            picked = [a["id"] for a in
+            # Gán vào `chosen` chứ KHÔNG gán thẳng `picked`: dòng addon_names bên dưới đọc
+            # `chosen`, nên nhánh cũ khiến chọn-bằng-số có id mà MẤT TÊN, và bản tóm tắt
+            # xác nhận hiện thiếu tên add-on khách vừa chọn.
+            chosen = [a for a in
                       (matching.pick_by_index(tok, allowed)
                        for tok in re.split(r"[^0-9]+", query) if tok)
                       if a is not None]
-        if not picked:                        # đọc tên không khớp add-on nào -> hỏi lại
+        if not chosen:                        # đọc tên không khớp add-on nào -> hỏi lại
             return False
 
-        s.addon_ids = picked
+        s.addon_ids = [a["id"] for a in chosen]
         s.addon_names = [a.get("name") or "" for a in chosen]
         s.addons_decided = True
         return True
 
     @staticmethod
     def _match_shop(session: Session, shops: list[dict]) -> bool:
-        """Map tên cửa hàng khách nêu (shop_text, vd 'Sendai') -> shop_id. Khớp DUY NHẤT ->
+        """Map tên cửa hàng khách nêu (shop_text, vd 'Hải Châu') -> shop_id. Khớp DUY NHẤT ->
         chọn luôn, khỏi hỏi lại. Không khớp / mơ hồ -> bot đọc lại danh sách cho khách chọn.
 
         Khách đổi shop giữa chừng thì merge_params đã gỡ shop_id + xoá catalog cũ, nên ở
@@ -1007,6 +1025,16 @@ class Orchestrator:
         if s.therapist_decided or not s.therapist_text:
             return False
         text, s.therapist_text = s.therapist_text, None   # tiêu thụ xong, tránh map lại
+        if nlu.is_no_preference(text):
+            # "Cửa hàng tự sắp xếp" — chính chữ bot vừa mời. Trước đây chỉ có nhánh
+            # merge_params bắt entity therapist='none'; câu này tới đây dưới dạng TÊN
+            # (qua _capture_choice_text hoặc LLM nhét cả câu vào ô therapist), khớp tên
+            # thất bại nên bot hỏi lại y hệt — khách kẹt ở THERAPIST (log lượt 8).
+            s.therapist_id = None
+            s.therapist_gender = None
+            s.therapist_decided = True
+            s.slot = None; s.confirm = None
+            return True
         t = _pick_unique(text, therapists)
         if t is None:
             return False
@@ -1185,6 +1213,21 @@ class Orchestrator:
         self._services_cache[key] = (now, data)
         return data
 
+    _SLOTS_TTL = 30             # giờ trống đổi nhanh hơn catalog -> cache ngắn hơn
+
+    def _get_slots(self, shop_id: int, **kw) -> dict:
+        """GET /slots có cache ngắn — xem _slots_cache."""
+        key = (shop_id, kw.get("date"), kw.get("party_size"), kw.get("course_id"),
+               tuple(kw.get("addon_ids") or ()), kw.get("therapist_id"),
+               kw.get("therapist_gender"))
+        now = time.time()
+        hit = self._slots_cache.get(key)
+        if hit and now - hit[0] < self._SLOTS_TTL:
+            return hit[1]
+        data = self.api.get_slots(shop_id, **kw)
+        self._slots_cache[key] = (now, data)
+        return data
+
     _TIMELINE_TTL = 60
 
     def _get_timeline(self, shop_id: int, date: str) -> dict:
@@ -1234,10 +1277,11 @@ class Orchestrator:
 
     def _contact_phone(self, session: Session, be_phone: str | None = None) -> str:
         """Số để khách LIÊN HỆ khi không đặt online được (chặn NG A5 / handoff / nhóm đông A8).
-        Ưu tiên số hỗ trợ/CSKH ở env (SUPPORT_PHONE, hoặc FALLBACK_SHOP_PHONE) để mọi ca 'liên
-        hệ' về một đầu mối; chưa cấu hình mới dùng số cửa hàng (BE trả, rồi /shops)."""
-        return (self.settings.support_phone or self.settings.fallback_shop_phone
-                or be_phone or self._shop_phone(session))
+        Có SUPPORT_PHONE thì mọi ca 'liên hệ' về một đầu mối CSKH chung; không đặt thì rơi về
+        số của CHÍNH cửa hàng đó trong DB (BE trả kèm lỗi, rồi /shops). Cố ý KHÔNG chèn
+        FALLBACK_SHOP_PHONE ở đây: nó là số chữa cháy lúc chưa biết shop nào, để trước
+        be_phone sẽ đè mất số thật của shop khách đang đặt."""
+        return (self.settings.support_phone or be_phone or self._shop_phone(session))
 
     def _shop_phone(self, session: Session) -> str:
         if session.shop_phone:

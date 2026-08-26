@@ -90,7 +90,7 @@ class Shop(db.Model):
 
 
 class Course(db.Model):
-    """Course chính (もみほぐし, ドライヘッドスパ...)."""
+    """Course chính (massage body, gội đầu dưỡng sinh...)."""
 
     __tablename__ = "course"
     __table_args__ = (
@@ -103,7 +103,7 @@ class Course(db.Model):
     shop_id: Mapped[int] = mapped_column(ForeignKey("shop.id"))
     name: Mapped[str] = mapped_column(sa.String(100))
     duration_min: Mapped[int] = mapped_column(comment="Bội số 15 phút")
-    price: Mapped[int] = mapped_column(comment="JPY")
+    price: Mapped[int] = mapped_column(comment="VND")
     is_active: Mapped[bool] = mapped_column(default=True, server_default=sa.true())
 
     shop: Mapped[Shop] = relationship(back_populates="courses")
@@ -114,7 +114,7 @@ class Course(db.Model):
 
 
 class Addon(db.Model):
-    """Add-on (足つぼ, プレミアムマットレス...) — chỉ đi kèm course chính (BR-01)."""
+    """Add-on (bấm huyệt bàn chân, nệm cao cấp...) — chỉ đi kèm course chính (BR-01)."""
 
     __tablename__ = "addon"
     __table_args__ = (
@@ -126,7 +126,7 @@ class Addon(db.Model):
     shop_id: Mapped[int] = mapped_column(ForeignKey("shop.id"))
     name: Mapped[str] = mapped_column(sa.String(100))
     duration_min: Mapped[int] = mapped_column(comment="Bội số 15 phút")
-    price: Mapped[int] = mapped_column(comment="JPY")
+    price: Mapped[int] = mapped_column(comment="VND")
     is_active: Mapped[bool] = mapped_column(default=True, server_default=sa.true())
 
     shop: Mapped[Shop] = relationship(back_populates="addons")

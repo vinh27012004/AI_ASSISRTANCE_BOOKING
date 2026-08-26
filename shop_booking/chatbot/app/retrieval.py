@@ -6,7 +6,7 @@ micro giây. Giữ được nguyên tắc "runnable offline" của service: BM25
 thuần, không cần mạng, test không cần mock gì.
 
 Hybrid vì corpus này có CẢ hai kiểu trượt:
-  - BM25 gánh thuật ngữ hiếm khớp nguyên văn ('momihogushi 30', 'NG list', tên chi nhánh)
+  - BM25 gánh thuật ngữ hiếm khớp nguyên văn ('massage body 30', 'NG list', tên chi nhánh)
     — chỗ embedding tiếng Việt hay nuốt mất.
   - Vector gánh câu diễn đạt khác ('hủy trước bao lâu' ↔ 'chính sách thay đổi đặt chỗ').
 Thiếu EMBEDDING_BASE_URL -> tự động lùi về BM25-only (vẫn dùng được, chỉ kém phần diễn giải).

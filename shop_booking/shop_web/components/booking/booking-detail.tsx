@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import type { Booking } from "@/lib/types";
-import { addMinutesToTime, formatDateVi, formatYen } from "@/lib/format";
+import { addMinutesToTime, formatDateVi, formatVnd } from "@/lib/format";
 import { BookingStatusBadge } from "./booking-status-badge";
 
 function Row({ label, children }: { label: string; children: ReactNode }) {
@@ -78,7 +78,7 @@ export function BookingDetail({ booking }: { booking: Booking }) {
         {booking.course ? (
           <>
             {booking.course.name} {booking.course.duration_min}p —{" "}
-            {formatYen(booking.course.price)}
+            {formatVnd(booking.course.price)}
             {booking.party_size > 1 ? "/người" : ""}
           </>
         ) : (
@@ -101,7 +101,7 @@ export function BookingDetail({ booking }: { booking: Booking }) {
             reservation.addons
               .map(
                 (addon) =>
-                  `${addon.name} ${addon.duration_min}p +${formatYen(addon.price)}`,
+                  `${addon.name} ${addon.duration_min}p +${formatVnd(addon.price)}`,
               )
               .join(" · ")
           )}
@@ -129,7 +129,7 @@ export function BookingDetail({ booking }: { booking: Booking }) {
       </Row>
 
       <Row label="Tổng">
-        <span className="font-semibold tabular-nums">{formatYen(total)}</span>
+        <span className="font-semibold tabular-nums">{formatVnd(total)}</span>
         <span className="ml-2 text-xs text-ink-3">thanh toán tại cửa hàng</span>
       </Row>
     </div>

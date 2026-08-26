@@ -52,6 +52,12 @@ class Settings:
     # --- FAQ / retrieval (app/retrieval.py). Corpus rỗng -> làn FAQ tắt hẳn, phần còn
     # lại chạy y như cũ. Embedding rỗng -> BM25-only, vẫn dùng được và vẫn test offline
     # được (cùng nguyên tắc use_real_llm / use_redis ở dưới).
+    # --- Hạn chờ LLM, tách theo chỗ gọi. Trước đây dùng chung 20s cho cả hai: NLU chặn
+    # cả lượt chat nên khách phải ngồi đợi trọn 20 giây rồi mới nhận được câu rule-based.
+    # NLU đo thật 2,2–4,4s (log 26/8) -> 8s là gấp đôi đầu, mà xấu nhất giảm 2,5 lần.
+    # NLG giờ chỉ còn GREETING/REPROMPT, hỏng thì có câu mẫu -> để ngắn hơn nữa.
+    llm_timeout_nlu: float = 8.0
+    llm_timeout_nlg: float = 6.0
     faq_corpus_path: str = ""
     faq_vector_cache_path: str = ""
     embedding_base_url: str = ""
@@ -85,9 +91,12 @@ def load_settings() -> Settings:
         session_ttl_seconds=int(os.environ.get("SESSION_TTL_SECONDS", "1800")),
         vault_enc_key=os.environ.get("VAULT_ENC_KEY", ""),
         fallback_shop_phone=os.environ.get("FALLBACK_SHOP_PHONE", ""),
-        # SUPPORT_PHONE riêng; chưa đặt thì lấy FALLBACK_SHOP_PHONE (số env sẵn có).
-        support_phone=os.environ.get("SUPPORT_PHONE", os.environ.get("FALLBACK_SHOP_PHONE", "")),
+        # Không mượn FALLBACK_SHOP_PHONE làm mặc định: hai số khác vai trò, mượn vào thì
+        # số chữa cháy sẽ đè lên số thật của shop khách đang đặt (_contact_phone).
+        support_phone=os.environ.get("SUPPORT_PHONE", ""),
         log_level=os.environ.get("LOG_LEVEL", "INFO"),
+        llm_timeout_nlu=float(os.environ.get("LLM_TIMEOUT_NLU", "8")),
+        llm_timeout_nlg=float(os.environ.get("LLM_TIMEOUT_NLG", "6")),
         # Mặc định trỏ vào data/faq.md cạnh service -> cài xong là FAQ chạy luôn, không
         # phải khai báo gì. Đặt FAQ_CORPUS_PATH= (rỗng) để tắt.
         faq_corpus_path=os.environ.get("FAQ_CORPUS_PATH", _default_faq_path()),

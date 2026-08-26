@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import type { Booking, BookingCreated } from "@/lib/types";
 import { Alert, Button, buttonClass } from "@/components/ui";
-import { formatCountdown, formatDateVi, formatYen } from "@/lib/format";
+import { formatCountdown, formatDateVi, formatVnd } from "@/lib/format";
 import { bookingTotals } from "./booking-detail";
 import { ReschedulePanel } from "./reschedule-panel";
 
@@ -97,7 +97,7 @@ export function StepSuccess({
         <p className="max-w-md text-xs text-ink-2">
           {formatDateVi(current.date)} · {current.start_time} ·{" "}
           {current.shop.name} · {current.party_size} người ·{" "}
-          <span className="tabular-nums">{formatYen(total)}</span>
+          <span className="tabular-nums">{formatVnd(total)}</span>
         </p>
         <p className="text-xs text-ink-3">
           Dùng mã này để sửa hoặc hủy ở trang Quản lý đặt chỗ.

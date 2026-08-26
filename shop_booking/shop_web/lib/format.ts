@@ -59,8 +59,9 @@ export function monthLabel(date: Date): string {
   return `Tháng ${date.getMonth() + 1}/${date.getFullYear()}`;
 }
 
-export function formatYen(amount: number): string {
-  return `¥${amount.toLocaleString("en-US")}`;
+/** 350000 -> "350.000₫" (dấu chấm phân nhóm theo cách viết tiền Việt). */
+export function formatVnd(amount: number): string {
+  return `${amount.toLocaleString("vi-VN")}₫`;
 }
 
 export function formatDuration(minutes: number): string {

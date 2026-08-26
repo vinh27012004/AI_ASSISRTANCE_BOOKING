@@ -11,7 +11,7 @@ import type {
   Therapist,
 } from "@/lib/types";
 import { Alert, Button, Chip, Spinner } from "@/components/ui";
-import { addMinutesToTime, formatDateVi, formatYen } from "@/lib/format";
+import { addMinutesToTime, formatDateVi, formatVnd } from "@/lib/format";
 import type { PartySize } from "./booking-wizard";
 
 function newUuid(): string {
@@ -216,7 +216,7 @@ export function StepConfirm({
               {course ? (
                 <>
                   {course.name} {course.duration_min}p —{" "}
-                  {formatYen(course.price)}
+                  {formatVnd(course.price)}
                   {partySize > 1 ? "/người" : ""}
                 </>
               ) : (
@@ -240,7 +240,7 @@ export function StepConfirm({
                 addonList
                   .map(
                     (addon) =>
-                      `${addon.name} ${addon.duration_min}p +${formatYen(addon.price)}`,
+                      `${addon.name} ${addon.duration_min}p +${formatVnd(addon.price)}`,
                   )
                   .join(" · ")
               )}
@@ -281,7 +281,7 @@ export function StepConfirm({
 
         <Row label="Tổng">
           <span className="font-semibold tabular-nums">
-            {formatYen(totalPrice)}
+            {formatVnd(totalPrice)}
           </span>
           <span className="ml-2 text-xs text-ink-3">thanh toán tại cửa hàng</span>
         </Row>

@@ -23,9 +23,10 @@ Kiểm tra nhanh sau khi sửa file này:
 python tests/check_faq.py          # bảng câu hỏi mẫu -> mục nào được chọn
 python tests/test_chatbot.py       # bộ test đầy đủ
 ```
-## Chào bạn
-Em chào anh/chị ạ
+## Chào
+> Chào bạn
 
+Dạ em chào anh/chị ạ  
 ## Hủy lịch thì làm thế nào, có mất phí không
 > hủy lịch
 > hủy đặt chỗ
@@ -99,7 +100,7 @@ người phù hợp để cả nhóm được phục vụ cùng giờ. Chỉ khi
 
 ## Nhóm đi cùng có chọn dịch vụ khác nhau được không
 > nhóm chọn gói khác nhau
-> mỗi người một dịch vụ
+> mỗi người một dịch vụ 
 > nhóm khác gói
 
 Dạ cả nhóm dùng chung một gói chính và chung một bộ add-on, cùng khung giờ ạ. Ai muốn

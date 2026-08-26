@@ -26,6 +26,11 @@ class QueryCtx:
     # Danh sách shop_id của câu trả lời TRƯỚC. Cho phép khách hỏi tiếp kiểu "trong 2 cửa
     # hàng đó cái nào có nhân viên nữ" mà không phải nhắc lại tên.
     shortlist: tuple[int, ...] = ()
+    # Gói dịch vụ khách ĐÃ chốt trong tờ đơn — theo TÊN, không theo id, vì id course/add-on
+    # là riêng của từng cửa hàng. Có nó thì câu "cửa hàng nào mở lúc 19h?" mới trả lời được
+    # theo đúng nghĩa "chỗ nào NHẬN ĐƯỢC gói này lúc 19h" (xem shop_info.shops_open_at).
+    course_name: Optional[str] = None
+    addon_names: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

@@ -217,20 +217,22 @@ def make_booking(shop, code_suffix, d, t, course, party, therapists, status,
 # --------------------------------------------------------------------------
 # Định nghĩa dữ liệu
 # --------------------------------------------------------------------------
-# Catalog dùng chung cho các shop mới (2,3,4). (name, duration_min, price JPY)
+# Catalog dùng chung cho các shop mới (2,3,4). (name, duration_min, price VND)
+# Tên gói KHÔNG kèm chữ "phút": chỗ hiển thị (chip FE, danh sách bot đọc) đã ghép sẵn
+# "· {duration_min} phút", để chữ đó trong tên nữa là lặp hai lần.
 COURSE_TEMPLATE = [
-    ("Momihogushi 30", 30, 2480),
-    ("Momihogushi 60", 60, 3980),
-    ("Momihogushi 90", 90, 5980),
-    ("Momihogushi 120", 120, 7980),
-    ("Dry Head Spa", 45, 3480),
-    ("Aroma Oil 90", 90, 6800),
+    ("Massage body 30", 30, 190000),
+    ("Massage body 60", 60, 350000),
+    ("Massage body 90", 90, 490000),
+    ("Massage body 120", 120, 650000),
+    ("Gội đầu dưỡng sinh", 45, 280000),
+    ("Massage tinh dầu 90", 90, 590000),
 ]
 ADDON_TEMPLATE = [
-    ("Ashitsubo", 15, 1200),
-    ("Premium Mattress", 15, 800),
-    ("Hot Stone", 15, 1000),
-    ("Aroma Oil", 30, 1500),
+    ("Bấm huyệt bàn chân", 15, 80000),
+    ("Nệm cao cấp", 15, 60000),
+    ("Đá nóng", 15, 90000),
+    ("Tinh dầu thơm", 30, 120000),
 ]
 
 # Therapist mỗi shop: (name, gender, username|None, work_weekdays(set Mon=0..Sun=6),
@@ -255,28 +257,28 @@ def main():
         shop1 = Shop.query.filter_by(shop_code="1301").first()
         if shop1:
             for name, dur, price in [
-                ("Momihogushi 120", 120, 7980),
-                ("Aroma Oil 90", 90, 6800),
+                ("Massage body 120", 120, 650000),
+                ("Massage tinh dầu 90", 90, 590000),
             ]:
                 _, c = get_or_create_course(shop1, name, dur, price)
                 stats["course"] += c
             for name, dur, price in [
-                ("Hot Stone", 15, 1000),
-                ("Aroma Oil", 30, 1500),
+                ("Đá nóng", 15, 90000),
+                ("Tinh dầu thơm", 30, 120000),
             ]:
                 _, c = get_or_create_addon(shop1, name, dur, price)
                 stats["addon"] += c
-            # Thêm 1 combo cấm nữa cho shop 1 (BR-09): Dry Head Spa + Hot Stone
-            dhs = Course.query.filter_by(shop_id=shop1.id, name="Dry Head Spa").first()
-            hot = Addon.query.filter_by(shop_id=shop1.id, name="Hot Stone").first()
+            # Thêm 1 combo cấm nữa cho shop 1 (BR-09): Gội đầu dưỡng sinh + Đá nóng
+            dhs = Course.query.filter_by(shop_id=shop1.id, name="Gội đầu dưỡng sinh").first()
+            hot = Addon.query.filter_by(shop_id=shop1.id, name="Đá nóng").first()
             if dhs and hot:
                 stats["combo"] += get_or_create_combo_restriction(dhs, hot)
 
         # ---- Các shop mới ----
         shops_def = [
-            ("1302", "Cửa hàng Sendai", "〒980-0021 Miyagi, Sendai", "022-234-5678"),
-            ("1303", "Cửa hàng Tokyo Shibuya", "〒150-0002 Tokyo, Shibuya", "03-1234-5678"),
-            ("1304", "Cửa hàng Osaka Namba", "〒542-0076 Osaka, Namba", "06-2345-6789"),
+            ("1302", "Cửa hàng Hải Châu", "88 Bạch Đằng, Hải Châu, Đà Nẵng", "0236 3812 1302"),
+            ("1303", "Cửa hàng Sài Gòn", "45 Lê Lợi, Quận 1, TP. Hồ Chí Minh", "028 3822 1303"),
+            ("1304", "Cửa hàng Huế", "20 Hùng Vương, Phường Phú Nhuận, Thành phố Huế", "0234 3845 1304"),
         ]
         shops = {}
         for code, name, addr, phone in shops_def:
@@ -297,31 +299,32 @@ def main():
                 addons[name] = a
                 stats["addon"] += cr
             catalog[code] = {"courses": courses, "addons": addons}
-            # Combo cấm (BR-09): Dry Head Spa + Ashitsubo; Aroma Oil 90 + Aroma Oil addon
+            # Combo cấm (BR-09): Gội đầu dưỡng sinh + Bấm huyệt bàn chân;
+            # Massage tinh dầu 90 + Tinh dầu thơm (đã có tinh dầu, cộng thêm là thừa)
             stats["combo"] += get_or_create_combo_restriction(
-                courses["Dry Head Spa"], addons["Ashitsubo"])
+                courses["Gội đầu dưỡng sinh"], addons["Bấm huyệt bàn chân"])
             stats["combo"] += get_or_create_combo_restriction(
-                courses["Aroma Oil 90"], addons["Aroma Oil"])
+                courses["Massage tinh dầu 90"], addons["Tinh dầu thơm"])
 
         # ---- Therapist + account + shift ----
         therapist_defs = {
             "1302": [
-                ("Sakura", Gender.FEMALE, "sakura02", WEEKDAYS, T(10), T(19)),
-                ("Riku", Gender.MALE, "riku02", {1, 2, 3, 4, 5}, T(11), T(20)),
-                ("Aoi", Gender.FEMALE, "aoi02", {2, 3, 4, 5, 6}, T(10), T(18)),
-                ("Haruto", Gender.MALE, None, {0, 4, 5, 6}, T(12), T(21)),  # chưa có account
+                ("Nguyễn Thu Trang", Gender.FEMALE, "trang02", WEEKDAYS, T(10), T(19)),
+                ("Trần Quốc Bảo", Gender.MALE, "bao02", {1, 2, 3, 4, 5}, T(11), T(20)),
+                ("Lê Ngọc Ánh", Gender.FEMALE, "anh02", {2, 3, 4, 5, 6}, T(10), T(18)),
+                ("Phạm Hoàng Long", Gender.MALE, None, {0, 4, 5, 6}, T(12), T(21)),  # chưa có account
             ],
             "1303": [
-                ("Sora", Gender.FEMALE, "sora03", FULL_WEEK - {2}, T(10), T(20)),
-                ("Ren", Gender.MALE, "ren03", {0, 1, 2, 3, 4, 5}, T(9), T(17)),
-                ("Yui", Gender.FEMALE, "yui03", {3, 4, 5, 6, 0}, T(13), T(22)),
-                ("Daichi", Gender.MALE, "daichi03", {5, 6}, T(10), T(22)),  # cuối tuần
-                ("Nao", Gender.FEMALE, None, WEEKDAYS, T(10), T(16)),  # chưa có account
+                ("Vũ Thanh Thảo", Gender.FEMALE, "thao03", FULL_WEEK - {2}, T(10), T(20)),
+                ("Đặng Minh Quân", Gender.MALE, "quan03", {0, 1, 2, 3, 4, 5}, T(9), T(17)),
+                ("Bùi Khánh Linh", Gender.FEMALE, "linh03", {3, 4, 5, 6, 0}, T(13), T(22)),
+                ("Hoàng Đại Nghĩa", Gender.MALE, "nghia03", {5, 6}, T(10), T(22)),  # cuối tuần
+                ("Ngô Phương Nhi", Gender.FEMALE, None, WEEKDAYS, T(10), T(16)),  # chưa có account
             ],
-            # Shop 4 Osaka: CÓ therapist nhưng KHÔNG có ca -> test SHOP_CLOSED
+            # Shop 4 Huế: CÓ therapist nhưng KHÔNG có ca -> test SHOP_CLOSED
             "1304": [
-                ("Kaito", Gender.MALE, "kaito04", set(), None, None),
-                ("Mei", Gender.FEMALE, None, set(), None, None),
+                ("Lý Gia Huy", Gender.MALE, "huy04", set(), None, None),
+                ("Trịnh Mỹ Duyên", Gender.FEMALE, None, set(), None, None),
             ],
         }
         therapists = {}  # (code, name) -> Therapist
@@ -349,16 +352,16 @@ def main():
         # ---- Customers: member có rank (BR-20) + vài guest ----
         customers_def = [
             # phone, email, type, rank, visits
-            ("08011110001", "gold.member@vidu.com", MemberType.MEMBER, "Gold", 12),
-            ("08011110002", "silver.member@vidu.com", MemberType.MEMBER, "Silver", 6),
-            ("08011110003", "platinum.member@vidu.com", MemberType.MEMBER, "Platinum", 30),
-            ("08011110004", "bronze.member@vidu.com", MemberType.MEMBER, "Bronze", 2),
-            ("08011110005", "gold2.member@vidu.com", MemberType.MEMBER, "Gold", 18),
-            ("08011110006", "diamond.member@vidu.com", MemberType.MEMBER, "Diamond", 55),
-            ("08022220001", "guest.a@vidu.com", MemberType.GUEST, None, 0),
-            ("08022220002", "guest.b@vidu.com", MemberType.GUEST, None, 1),
-            ("07033330001", "regular.c@vidu.com", MemberType.MEMBER, "Regular", 3),
-            ("07033330002", "guest.d@vidu.com", MemberType.GUEST, None, 0),
+            ("0901110001", "gold.member@vidu.com", MemberType.MEMBER, "Gold", 12),
+            ("0901110002", "silver.member@vidu.com", MemberType.MEMBER, "Silver", 6),
+            ("0901110003", "platinum.member@vidu.com", MemberType.MEMBER, "Platinum", 30),
+            ("0901110004", "bronze.member@vidu.com", MemberType.MEMBER, "Bronze", 2),
+            ("0901110005", "gold2.member@vidu.com", MemberType.MEMBER, "Gold", 18),
+            ("0901110006", "diamond.member@vidu.com", MemberType.MEMBER, "Diamond", 55),
+            ("0902220001", "guest.a@vidu.com", MemberType.GUEST, None, 0),
+            ("0902220002", "guest.b@vidu.com", MemberType.GUEST, None, 1),
+            ("0703330001", "regular.c@vidu.com", MemberType.MEMBER, "Regular", 3),
+            ("0703330002", "guest.d@vidu.com", MemberType.GUEST, None, 0),
         ]
         cust = {}
         for phone, email, mtype, rank, visits in customers_def:
@@ -368,9 +371,9 @@ def main():
 
         # ---- NG list (BR-06) ----
         for phone, reason in [
-            ("08099990001", "Nhiều lần no-show liên tiếp"),
-            ("08099990002", "Hành vi không phù hợp với nhân viên"),
-            ("07099990003", "Khách tự yêu cầu chặn đặt online"),
+            ("0909990001", "Nhiều lần no-show liên tiếp"),
+            ("0909990002", "Hành vi không phù hợp với nhân viên"),
+            ("0709990003", "Khách tự yêu cầu chặn đặt online"),
         ]:
             _, cr = get_or_create_ng(phone, reason)
             stats["ng"] += cr
@@ -389,33 +392,33 @@ def main():
 
         bookings_plan = [
             # shop, suffix, date, time, course, party, [therapists], status, customer, addons, req_tid, req_gender
-            (s2, "SEED1", date(2026, 7, 28), T(14), c2["Momihogushi 60"], 1,
-             [th("1302", "Sakura")], BookingStatus.CONFIRMED, cust["08011110001"],
+            (s2, "SEED1", date(2026, 7, 28), T(14), c2["Massage body 60"], 1,
+             [th("1302", "Nguyễn Thu Trang")], BookingStatus.CONFIRMED, cust["0901110001"],
              None, None, None),
-            (s2, "SEED2", date(2026, 7, 29), T(11), c2["Momihogushi 60"], 2,
-             [th("1302", "Sakura"), th("1302", "Riku")], BookingStatus.CONFIRMED,
-             cust["08011110002"], None, None, None),
-            (s2, "SEED3", date(2026, 7, 30), T(16), c2["Dry Head Spa"], 1,
-             [th("1302", "Aoi")], BookingStatus.CONFIRMED, cust["08022220001"],
-             [[a2["Premium Mattress"]]], None, Gender.FEMALE),  # chỉ định theo giới nữ
-            (s2, "SEED4", date(2026, 7, 27), T(10), c2["Momihogushi 90"], 1,
-             [th("1302", "Sakura")], BookingStatus.COMPLETED, cust["08011110003"],
+            (s2, "SEED2", date(2026, 7, 29), T(11), c2["Massage body 60"], 2,
+             [th("1302", "Nguyễn Thu Trang"), th("1302", "Trần Quốc Bảo")], BookingStatus.CONFIRMED,
+             cust["0901110002"], None, None, None),
+            (s2, "SEED3", date(2026, 7, 30), T(16), c2["Gội đầu dưỡng sinh"], 1,
+             [th("1302", "Lê Ngọc Ánh")], BookingStatus.CONFIRMED, cust["0902220001"],
+             [[a2["Nệm cao cấp"]]], None, Gender.FEMALE),  # chỉ định theo giới nữ
+            (s2, "SEED4", date(2026, 7, 27), T(10), c2["Massage body 90"], 1,
+             [th("1302", "Nguyễn Thu Trang")], BookingStatus.COMPLETED, cust["0901110003"],
              None, None, None),
-            (s2, "SEED5", date(2026, 8, 3), T(13), c2["Momihogushi 60"], 1,
-             [th("1302", "Sakura")], BookingStatus.CANCELLED, cust["07033330002"],
+            (s2, "SEED5", date(2026, 8, 3), T(13), c2["Massage body 60"], 1,
+             [th("1302", "Nguyễn Thu Trang")], BookingStatus.CANCELLED, cust["0703330002"],
              None, None, None),
 
-            (s3, "SEED1", date(2026, 7, 28), T(15), c3["Aroma Oil 90"], 1,
-             [th("1303", "Sora")], BookingStatus.CONFIRMED, cust["08011110005"],
+            (s3, "SEED1", date(2026, 7, 28), T(15), c3["Massage tinh dầu 90"], 1,
+             [th("1303", "Vũ Thanh Thảo")], BookingStatus.CONFIRMED, cust["0901110005"],
              None, None, None),
-            (s3, "SEED2", date(2026, 8, 1), T(12), c3["Momihogushi 60"], 3,
-             [th("1303", "Sora"), th("1303", "Ren"), th("1303", "Daichi")],
-             BookingStatus.CONFIRMED, cust["08011110002"], None, None, None),
-            (s3, "SEED3", date(2026, 7, 31), T(18), c3["Momihogushi 90"], 1,
-             [th("1303", "Yui")], BookingStatus.CONFIRMED, cust["08022220002"],
-             None, th("1303", "Yui").id, None),  # chỉ định ĐÍCH DANH Yui
-            (s3, "SEED4", date(2026, 7, 27), T(11), c3["Momihogushi 60"], 1,
-             [th("1303", "Ren")], BookingStatus.COMPLETED, cust["07033330001"],
+            (s3, "SEED2", date(2026, 8, 1), T(12), c3["Massage body 60"], 3,
+             [th("1303", "Vũ Thanh Thảo"), th("1303", "Đặng Minh Quân"), th("1303", "Hoàng Đại Nghĩa")],
+             BookingStatus.CONFIRMED, cust["0901110002"], None, None, None),
+            (s3, "SEED3", date(2026, 7, 31), T(18), c3["Massage body 90"], 1,
+             [th("1303", "Bùi Khánh Linh")], BookingStatus.CONFIRMED, cust["0902220002"],
+             None, th("1303", "Bùi Khánh Linh").id, None),  # chỉ định ĐÍCH DANH Khánh Linh
+            (s3, "SEED4", date(2026, 7, 27), T(11), c3["Massage body 60"], 1,
+             [th("1303", "Đặng Minh Quân")], BookingStatus.COMPLETED, cust["0703330001"],
              None, None, None),
         ]
         for (shop, suffix, d, t, course, party, ths, status, customer,

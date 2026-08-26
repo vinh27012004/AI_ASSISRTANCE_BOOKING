@@ -54,11 +54,27 @@ def build_prompt(state_key: str, session: Session, api_result: dict) -> dict:
 # MODIFY: menu "đổi gì" — ép template tất định để chèn đồng hồ "sửa nhanh còn ~m:ss" (BR-17)
 # chính xác, không để LLM bịa/bỏ.
 # INFO: câu trả lời tra cứu chứa giờ làm/địa chỉ/giá THẬT -> tất định, cấm LLM viết lại.
+# SHOP/DATE/PARTY_SIZE/COURSE/THERAPIST/CONTACT/CONFIRM chuyển sang tất định (26/8): chúng
+# chỉ ĐỌC LẠI danh sách lấy từ API — tên cửa hàng, tên gói + giá, tên nhân viên, bản tóm
+# tắt đơn — đúng loại "câu chứa số liệu thật" mà quy tắc này sinh ra để bảo vệ. Ba lý do:
+#
+# 1. Tốc độ: log 26/8 có 11 lượt gọi LLM cho NLG trong 15 lượt chat, mỗi lượt 1,9–3,4s.
+#    Đây là nửa độ trễ của cả phiên.
+# 2. Nhất quán: LLM tự đổi xưng hô giữa các lượt trong CÙNG một phiên — "Quý khách" ở
+#    lượt 2, "Bạn" ở lượt 8 — trong khi template luôn dùng "Anh/chị".
+# 3. CONFIRM là màn khách dựa vào để bấm đồng ý; nội dung nó phải khớp từng chữ với đơn
+#    sắp gửi đi, không phải bản diễn đạt lại.
+#
+# GREETING và REPROMPT ở lại với LLM: không chứa số liệu, và là hai chỗ câu chữ đa dạng
+# thật sự có giá trị (lời chào mở đầu, câu "em chưa hiểu" lặp nhiều lần dễ thành máy móc).
 _LITERAL_SAFE_KEYS = {"SLOT", "ADDON", "MODIFY", "END", "HANDOFF", "ERROR", "DONE", "UPDATED",
-                      "CANCELLED", "INFO", "OUT_OF_SCOPE"}
+                      "CANCELLED", "INFO", "OUT_OF_SCOPE",
+                      "SHOP", "DATE", "PARTY_SIZE", "COURSE", "THERAPIST", "CONTACT",
+                      "CONFIRM"}
 
 
-def generate(prompt: dict, llm: RealLLMClient | None) -> str:
+def generate(prompt: dict, llm: RealLLMClient | None,
+             timeout: float | None = None) -> str:
     """Sinh câu. Không router HOẶC câu chứa số/mã thật -> câu mẫu code (khớp chính xác)."""
     if llm is None or prompt["key"] in _LITERAL_SAFE_KEYS:
         via = "câu mẫu (chưa cấu hình LLM)" if llm is None else "template tất định (cấm LLM bịa số)"
@@ -70,7 +86,8 @@ def generate(prompt: dict, llm: RealLLMClient | None) -> str:
             {k: prompt[k] for k in ("instruction", "facts")},
             ensure_ascii=False,
         )
-        text = llm.complete(_NLG_SYSTEM, user, temperature=0.4, max_tokens=400)
+        text = llm.complete(_NLG_SYSTEM, user, temperature=0.4, max_tokens=400,
+                            timeout=timeout)
         if text.strip():
             turnlog.nlg(prompt["key"], "llm", time.perf_counter() - _t0)
             return text.strip()
@@ -108,7 +125,7 @@ def _facts_for(state_key: str, session: Session, api_result: dict) -> dict:
         facts["ngay_list"] = _date_list_line(ar.get("active_dates"))
     elif state_key == "COURSE":
         courses = [
-            f'{c.get("name")} · {c.get("duration_min")} phút · {c.get("price")}¥'
+            f'{c.get("name")} · {c.get("duration_min")} phút · {format_price(c.get("price"))}'
             for c in ar.get("courses", [])
         ]
         facts["course"] = courses
@@ -182,6 +199,14 @@ def format_date_list(dates, limit: int = _DATE_LIST_LIMIT) -> str:
             shown.append(iso)
     return ", ".join(shown)
 
+
+def format_price(amount) -> str:
+    """350000 -> '350.000₫'. Tách nhóm bằng DẤU CHẤM theo lối viết tiền Việt; số lạ
+    (None, chuỗi) thì trả nguyên xi chứ không nổ giữa câu chào khách."""
+    try:
+        return f"{int(amount):,}".replace(",", ".") + "₫"
+    except (TypeError, ValueError):
+        return str(amount)
 
 # Bước giờ của hệ thống là 15 phút (BR-02: course bội số 15). CỐ ĐỊNH 15 chứ không suy từ
 # dữ liệu — với danh sách thưa như ["14:30","15:15"] mà suy bước = 45 thì sẽ gộp thành dải
@@ -271,7 +296,7 @@ def _addon_prompt_line(session: Session, api_result: dict) -> str:
     ]
     # Trình bày GIỐNG danh sách gói: mỗi dòng một mục, đánh số, kèm thời lượng và giá.
     offered = "\n".join(
-        f'{i}. {a.get("name")} · {a.get("duration_min")} phút · {a.get("price")}¥'
+        f'{i}. {a.get("name")} · {a.get("duration_min")} phút · {format_price(a.get("price"))}'
         for i, a in enumerate(allowed, 1)
     )
     return _ADDON_LINE.format(ds=offered, p=_addon_group_note(session))

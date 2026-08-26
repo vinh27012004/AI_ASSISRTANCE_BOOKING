@@ -5,6 +5,7 @@ import { api, toApiError } from "@/lib/api";
 import { useRequest } from "@/lib/use-request";
 import { useSelectedShopId } from "@/lib/use-selected-shop";
 import type { AdminCourse } from "@/lib/types";
+import { formatVnd } from "@/lib/format";
 import { Card, Button, Spinner, Alert, TextInput } from "@/components/ui";
 
 type Tab = "courses" | "addons" | "combos";
@@ -196,7 +197,7 @@ function ServiceCrudSection({
               />
             </div>
             <div>
-              <label className="block text-xs font-semibold text-ink-2 mb-1.5 uppercase">Giá (JPY)</label>
+              <label className="block text-xs font-semibold text-ink-2 mb-1.5 uppercase">Giá (VNĐ)</label>
               <TextInput
                 type="number"
                 value={price}
@@ -261,7 +262,7 @@ function ServiceCrudSection({
                   <tr key={item.id} className="hover:bg-surface-2 transition-colors">
                     <td className="px-6 py-4 font-semibold text-ink">{item.name}</td>
                     <td className="px-6 py-4 text-ink-2">{item.duration_min} phút</td>
-                    <td className="px-6 py-4 text-ink-2">¥{item.price.toLocaleString()}</td>
+                    <td className="px-6 py-4 text-ink-2">{formatVnd(item.price)}</td>
                     <td className="px-6 py-4">
                       <span
                         className={`inline-block px-2.5 py-1 text-xs font-semibold rounded-full ${

@@ -17,7 +17,7 @@ import {
 import {
   addMinutesToTime,
   formatDateShortVi,
-  formatYen,
+  formatVnd,
   hhmmToMinutes,
   nowMinutes,
   parseIso,
@@ -264,7 +264,7 @@ export function StepServices({
               {courseGroups.map((group) => {
                 // Nhãn tên tách riêng chỉ đáng khi một tên có nhiều mức thời
                 // lượng (wireframe: "tên trái + chips số phút"). Shop đặt tên
-                // sẵn kiểu "Momihogushi 60" thì nhãn + chip lặp số phút, gộp
+                // sẵn kiểu "Massage body 60" thì nhãn + chip lặp số phút, gộp
                 // luôn tên vào chip cho gọn.
                 const grouped = group.list.length > 1;
                 return (
@@ -284,7 +284,7 @@ export function StepServices({
                         onClick={() => onSelectCourse(item.id)}
                       >
                         {grouped ? "" : `${group.name} · `}
-                        {item.duration_min}p · {formatYen(item.price)}
+                        {item.duration_min}p · {formatVnd(item.price)}
                       </Chip>
                     ))}
                   </div>
@@ -328,7 +328,7 @@ export function StepServices({
                         onClick={() => toggleAddon(addon.id)}
                       >
                         {addon.name} +{addon.duration_min}p ·{" "}
-                        {formatYen(addon.price)}
+                        {formatVnd(addon.price)}
                       </Chip>
                     );
                   })}
@@ -391,7 +391,7 @@ export function StepServices({
                     <> · Add-on: +{maxDuration - course.duration_min}p</>
                   ) : null}
                   {" · "}
-                  <b>Tổng: {maxDuration}p</b> · {formatYen(totalPrice)}
+                  <b>Tổng: {maxDuration}p</b> · {formatVnd(totalPrice)}
                   {partySize > 1 ? ` (${partySize} người)` : ""}
                 </>
               ) : (

@@ -45,11 +45,11 @@ _NLU_SYSTEM = (
     "đặt tối đa mấy người, có chỉ định được nhân viên không, add-on đặt riêng được không, "
     "mã đặt chỗ, quy định đến muộn. Mấy thứ này không tra bảng nào mà tra tài liệu.\n"
     "course là TÊN GÓI ĐÚNG NHƯ KHÁCH NÓI, GIỮ NGUYÊN cả số phút trong tên "
-    "(vd 'momihogushi 30' -> course='momihogushi 30', TUYỆT ĐỐI không tách 30 sang duration) "
+    "(vd 'massage body 30' -> course='massage body 30', TUYỆT ĐỐI không tách 30 sang duration) "
     "— tên thiếu số phút sẽ trùng nhiều gói và hệ thống không chọn được.\nn"
     "QUAN TRỌNG: date PHẢI là ngày tuyệt đối YYYY-MM-DD. Khách nói tương đối (hôm nay/mai/"
     "ngày kia/thứ Hai tuần sau) thì tự quy đổi dựa trên 'Hôm nay' được cung cấp; time là 24h "
-    "HH:MM. shop LÀ TÊN/ĐỊA ĐIỂM cửa hàng khách nêu (vd 'Sendai', 'Tokyo', 'chi nhánh Osaka') — "
+    "HH:MM. shop LÀ TÊN/ĐỊA ĐIỂM cửa hàng khách nêu (vd 'Hải Châu', 'Sài Gòn', 'chi nhánh Huế') — "
     "chỉ trích khi khách CHỈ RÕ cửa hàng, không suy diễn. Không thêm chữ nào ngoài JSON. "
     "Không suy diễn giá trị khách không nói (để null)."
 )
@@ -59,7 +59,8 @@ _NLU_SYSTEM = (
 #  Public                                                                      #
 # --------------------------------------------------------------------------- #
 
-def extract(masked_text: str, llm: RealLLMClient | None) -> dict | None:
+def extract(masked_text: str, llm: RealLLMClient | None,
+            timeout: float | None = None) -> dict | None:
     """Trả {'intent', 'entities'} đã validate, hoặc None nếu không trích được (hỏi lại)."""
     _t0 = time.perf_counter()
     if llm is None:
@@ -72,7 +73,7 @@ def extract(masked_text: str, llm: RealLLMClient | None) -> dict | None:
             raw = llm.complete(
                 _NLU_SYSTEM,
                 f"[Hôm nay={today.isoformat()} ({today:%A})] {masked_text}",
-                temperature=0.0, max_tokens=400, response_json=True,
+                temperature=0.0, max_tokens=400, response_json=True, timeout=timeout,
             )
             parsed = validate_schema(_parse_json(raw))
         except LLMError:
@@ -255,12 +256,44 @@ _NEGATIVE_EXACT = {"không", "khong", "ko", "k", "thôi", "thoi"}
 # Khách gom cả danh sách ("cho tôi tất cả", "lấy hết đi", "cả 4 cái"). Chỉ dùng ở bước
 # ADDON — nơi duy nhất chọn được nhiều mục.
 _ALL_WORDS = ("tất cả", "tat ca", "toàn bộ", "toan bo", "hết", "het luôn", "trọn gói",
-              "cả bộ", "full", "lấy hết", "lay het", "thêm hết", "them het")
+              "cả bộ", "full", "lấy hết", "lay het", "thêm hết", "them het",
+              "cả ba", "cả hai", "cả bốn", "cả 3 thứ", "hết cả")
+
+# Dạng "cả N cái" / "cả 3 món" / "cả 2" — comment gốc của _ALL_WORDS đã nêu ví dụ này
+# nhưng bảng chữ lại không có, nên "Cả 3 cái" rơi xuống nhánh SỐ THỨ TỰ và bị hiểu thành
+# "mục số 3": khách xin 3 add-on, hệ thống ghi 1, KHÔNG báo gì. Bắt bằng regex vì N thay đổi.
+_ALL_N_RE = re.compile(r"\bcả\s*(\d{1,2})\b")
 
 
-def is_select_all(text: str) -> bool:
+def is_select_all(text: str, n_items: int | None = None) -> bool:
+    """`n_items`: số mục đang mời. Có nó thì "cả 3 cái" chỉ được coi là 'lấy hết' khi danh
+    sách đúng 3 mục — "cả 2 cái" trong danh sách 3 mục là khách chọn 2 cái nào đó, không
+    phải lấy hết, và ta không đoán bừa."""
     low = (text or "").strip().lower()
-    return any(w in low for w in _ALL_WORDS)
+    if any(w in low for w in _ALL_WORDS):
+        return True
+    m = _ALL_N_RE.search(low)
+    if not m:
+        return False
+    return n_items is None or int(m.group(1)) == n_items
+
+
+# "Không chỉ định ai" ở bước THERAPIST. Bảng cũ chỉ có 3 cụm và THIẾU đúng chữ mà chính bot
+# dùng để mời ("hay để cửa hàng tự sắp?") — khách trả lời lặp lại lời mời thì bot không
+# hiểu và hỏi lại y hệt, tạo vòng lặp (log lượt 8).
+_NO_PREFERENCE_RE = re.compile(
+    r"(không chỉ định|khong chi dinh|không cần chỉ định|ai cũng được|ai cung duoc|bất kỳ|"
+    r"bat ky|tự sắp|tu sap|tự xếp|cửa hàng sắp|cửa hàng xếp|shop sắp|shop xếp|"
+    r"tùy (?:shop|cửa hàng|bên|quán)|tuy (?:shop|cua hang)|sao cũng được|sao cung duoc|"
+    r"thế nào cũng được|người nào cũng được|ai trống|ai rảnh)"
+)
+
+
+def is_no_preference(text: str) -> bool:
+    """Khách nói 'khỏi chỉ định, để cửa hàng sắp'. Dùng ở cả nhánh rule-based lẫn
+    _match_therapist — LLM cũng hay trả nguyên câu đó vào ô `therapist` như thể là TÊN
+    người, rồi khớp tên thất bại và bot hỏi lại."""
+    return bool(_NO_PREFERENCE_RE.search((text or "").strip().lower()))
 
 
 def is_negative(text: str) -> bool:
@@ -371,7 +404,7 @@ _ASK_LIST_WORDS = ("cửa hàng nào", "cua hang nao", "những cửa hàng", "c
                    "danh sách cửa hàng", "bao nhiêu cửa hàng", "mấy cửa hàng")
 
 
-# Từ để hỏi. Khách TRẢ LỜI câu bot hỏi ("Sendai", "Gói đầu tiên", "momihogushi 30") gần như
+# Từ để hỏi. Khách TRẢ LỜI câu bot hỏi ("Hải Châu", "Gói đầu tiên", "massage body 30") gần như
 # không bao giờ chứa mấy từ này, còn câu hỏi thật thì hầu như luôn có (kể cả khi quên "?":
 # "Cửa hàng nào mở lúc 7h tối nay.").
 _QUESTION_WORDS = ("nào", "đâu", "bao nhiêu", "mấy giờ", "mấy tiếng", "khi nào", "thế nào",
@@ -416,6 +449,18 @@ _YES_WORDS = ("đồng ý", "xác nhận", "đúng rồi", "chốt", "vâng", "o
 _NO_WORDS = ("không phải", "sai rồi", "chưa đúng")
 
 
+def _has_word(low: str, words) -> bool:
+    """Khớp theo RANH GIỚI TỪ, không phải chuỗi con.
+
+    Lý do: 'hủy' nằm gọn trong 'Thủy' — tên người và tên địa danh (Thủy Nguyên) đều rất
+    phổ biến. Khớp chuỗi con khiến mọi câu nhắc tới Thủy đều thành intent=cancel; ở bước
+    CONFIRM thì câu "đổi sang Cửa hàng Thủy Nguyên" (ý muốn ĐỔI) hoá ra là lệnh hủy. Cùng
+    loại lỗi: 'ok' nằm trong tên riêng viết không dấu.
+
+    `\\b` của Python hiểu chữ Unicode nên chạy đúng với tiếng Việt có dấu."""
+    return any(re.search(rf"\b{re.escape(w)}\b", low) for w in words)
+
+
 def _rule_based(text: str) -> dict:
     """Trích param offline khi chưa cấu hình router. Phủ luồng chính; không thay LLM thật."""
     low = text.lower()
@@ -426,9 +471,9 @@ def _rule_based(text: str) -> dict:
         question_type = None
     elif question_type:
         intent = "ask_info"
-    elif any(w in low for w in _CANCEL_WORDS):
+    elif _has_word(low, _CANCEL_WORDS):
         intent = "cancel"
-    elif any(w in low for w in _MODIFY_WORDS):
+    elif _has_word(low, _MODIFY_WORDS):
         intent = "modify"
 
     entities = {k: None for k in _ENTITY_KEYS}
@@ -464,13 +509,13 @@ def _rule_based(text: str) -> dict:
         entities["therapist"] = "female"
     elif re.search(r"\b(nam)\b", low):
         entities["therapist"] = "male"
-    elif re.search(r"(không chỉ định|ai cũng được|bất kỳ)", low):
+    elif _NO_PREFERENCE_RE.search(low):
         entities["therapist"] = "none"
 
-    # confirm
+    # confirm — _has_word chứ KHÔNG phải `in`: xem docstring _has_word ('ok' ⊂ 'Sài Gòn').
     if any(w in low for w in _NO_WORDS):
         entities["confirm"] = "no"
-    elif any(w in low for w in _YES_WORDS):
+    elif _has_word(low, _YES_WORDS):
         entities["confirm"] = "yes"
 
     return {"intent": intent, "entities": entities, "question_type": question_type}

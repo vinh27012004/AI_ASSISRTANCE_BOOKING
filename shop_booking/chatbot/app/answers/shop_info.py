@@ -26,13 +26,17 @@ def _mins(t: str) -> int:
     return int(h) * 60 + int(m)
 
 
+def _hhmm(m: int) -> str:
+    return f"{(m // 60) % 24:02d}:{m % 60:02d}"
+
+
 def _plus12(t: str) -> str | None:
     """'07:00' -> '19:00'. Dùng khi khách nói '7h' trần (không rõ sáng hay tối)."""
     try:
         m = _mins(t) + 12 * 60
     except (ValueError, IndexError):
         return None
-    return f"{(m // 60) % 24:02d}:{m % 60:02d}" if m < 24 * 60 else None
+    return _hhmm(m) if m < 24 * 60 else None
 
 
 def _today() -> str:
@@ -44,7 +48,7 @@ def _resolve_shop(ctx: QueryCtx, shops: list[dict]) -> dict | None:
     trong phiên -> chịu (hỏi lại).
 
     Lùi về câu gốc vì nhánh rule-based (chưa cấu hình LLM) không biết tên cửa hàng — chúng
-    đến từ API. pick_unique khớp chuỗi-con hai chiều nên "Cửa hàng Sendai ở đâu?" trúng
+    đến từ API. pick_unique khớp chuỗi-con hai chiều nên "Cửa hàng Hải Châu ở đâu?" trúng
     đúng một shop, còn "địa chỉ các cửa hàng?" không trúng shop nào -> liệt kê tất cả."""
     q = ctx.entities.get("shop")
     sh = matching.pick_unique(str(q), shops) if q else None
@@ -78,23 +82,42 @@ def _scope(ctx: QueryCtx, shops: list[dict]) -> list[dict]:
 #  "Cửa hàng nào còn mở lúc 7h?"                                               #
 # --------------------------------------------------------------------------- #
 
-def _has_shift_at(api, shop_id: int, day: str, t: str) -> bool:
-    """Bảng shop KHÔNG có open_time/close_time (models/shop.py) — trong hệ này "mở cửa" =
+def _spans_at(api, shop_id: int, day: str, t: str) -> list[int]:
+    """Mỗi nhân viên CÓ CA phủ giờ `t`: còn bao nhiêu phút nữa mới tan ca. Sắp GIẢM DẦN.
+
+    Bảng shop KHÔNG có open_time/close_time (models/shop.py) — trong hệ này "mở cửa" =
     CÓ NHÂN VIÊN CÓ CA, đúng định nghĩa mà GET /availability dùng. GET /timeline trả
-    therapists[].shifts[] nên xét: tồn tại ca thỏa start <= t < end."""
+    therapists[].shifts[] nên từ MỘT danh sách này đọc được cả hai thứ: giờ đó có ai trực
+    không (rỗng hay không), và còn phục vụ được lượt dài bao nhiêu phút cho nhóm mấy người
+    (phần tử thứ n-1 — nhóm n người cần n nhân viên CÙNG LÚC)."""
     data = api.get_timeline(shop_id, day)
     try:
-        m = _mins(t)
+        want = _mins(t)
     except (ValueError, IndexError):
-        return False
+        return []
+    out = []
     for th in data.get("therapists", []):
+        rem = 0
         for sh in th.get("shifts", []):
             try:
-                if _mins(sh["start_time"]) <= m < _mins(sh["end_time"]):
-                    return True
+                if _mins(sh["start_time"]) <= want < _mins(sh["end_time"]):
+                    rem = max(rem, _mins(sh["end_time"]) - want)
             except (ValueError, KeyError, IndexError):
                 continue
-    return False
+        if rem:
+            out.append(rem)
+    out.sort(reverse=True)
+    return out
+
+
+def _budget(spans: list[int], party: int) -> int:
+    """Quỹ phút cho `party` người cùng lúc — 0 nếu không đủ người trực."""
+    return spans[party - 1] if len(spans) >= party else 0
+
+
+def _has_shift_at(api, shop_id: int, day: str, t: str) -> bool:
+    """Có nhân viên nào đang trong ca lúc `t` không."""
+    return bool(_spans_at(api, shop_id, day, t))
 
 
 def _shifts(api, shop_id: int, day: str) -> list[dict]:
@@ -119,7 +142,7 @@ def _day_hours(api, shops: list[dict], day: str) -> tuple[str, str] | None:
             hi = en if hi is None else max(hi, en)
     if lo is None or hi is None:
         return None
-    return f"{lo // 60:02d}:{lo % 60:02d}", f"{hi // 60:02d}:{hi % 60:02d}"
+    return _hhmm(lo), _hhmm(hi)
 
 
 def _shops_open_on(api, day: str) -> Answer:
@@ -131,6 +154,248 @@ def _shops_open_on(api, day: str) -> Answer:
     return Answer(f"Ngày {_d(day)} các cửa hàng có làm là: "
                   f"{', '.join(s['name'] for s in hits)} ạ.",
                   shortlist=tuple(s["id"] for s in hits))
+
+
+# --------------------------------------------------------------------------- #
+#  Đã chốt gói -> "mở lúc 19h" phải hiểu là "NHẬN ĐƯỢC GÓI NÀY lúc 19h"        #
+# --------------------------------------------------------------------------- #
+#
+# Bug thật trong log: bước chọn giờ vừa báo "19:00 không còn trống" ở Cửa hàng Hải Châu thì
+# ngay lượt sau, câu "kiếm giúp cửa hàng nào mở lúc 7h tối" lại kể tên chính cửa hàng đó.
+# Cùng một dữ liệu mà hai câu ngược nhau, vì câu hỏi trước đây chỉ xét CÓ AI TRỰC lúc
+# 19:00. Gói Massage tinh dầu 90 kèm 3 add-on dài 135 phút: bắt đầu 19:00 thì 21:15 mới xong,
+# muộn hơn giờ tan ca của mọi nhân viên -> có người trực vẫn không nhận được.
+
+_TRY_LIMIT = 3          # số gói thay thế tối đa đem đi hỏi /slots (đây chỉ là câu gợi ý)
+
+
+def _wanted_party(ctx: QueryCtx) -> int:
+    try:
+        return max(int(ctx.entities.get("party_size") or ctx.party_size or 1), 1)
+    except (TypeError, ValueError):
+        return 1
+
+
+def _upcoming(slots: list[str], day: str) -> list[str]:
+    """Bỏ giờ ĐÃ QUA nếu hỏi cho HÔM NAY (cùng luật Orchestrator._future_slots)."""
+    from datetime import datetime as _dt
+
+    if day != _today():
+        return slots
+    now = _dt.now().hour * 60 + _dt.now().minute
+    out = []
+    for t in slots:
+        try:
+            if _mins(t) >= now:
+                out.append(t)
+        except (ValueError, IndexError):
+            continue
+    return out
+
+
+def _slots_of(api, shop_id: int, day: str, party: int, combo: dict) -> list[str]:
+    """Giờ ĐẶT ĐƯỢC thật cho gói này. Hỏi thẳng GET /slots vì chỉ BE mới tính đủ ba thứ:
+    ca làm, khoảng đã có khách đặt, và thời lượng gói phải nằm gọn trong ca."""
+    data = api.get_slots(shop_id, date=day, party_size=party,
+                         course_id=combo["course"]["id"],
+                         addon_ids=[a["id"] for a in combo["addons"]])
+    return _upcoming(list(data.get("slots") or []), day)
+
+
+def _combo_at(api, shop_id: int, day: str, party: int,
+              course_name: str, addon_names: tuple[str, ...]) -> dict | None:
+    """Gói khách đã chốt, DỊCH sang catalog của một cửa hàng khác.
+
+    id course/add-on là riêng từng shop nên phải khớp lại theo TÊN. None = shop đó không
+    có gói này. Add-on shop không bán, hoặc bị cấm kèm gói này (BR-09), rơi vào `missing`
+    để câu trả lời nói thật chứ không lặng lẽ bỏ bớt rồi hứa suông."""
+    data = api.get_services(shop_id, day, party)
+    courses = data.get("courses") or []
+    addons = data.get("addons") or []
+    course = next((c for c in courses
+                   if matching.name_matches(course_name, c.get("name") or "")), None)
+    if course is None:
+        return None
+    picked, missing = [], []
+    for nm in addon_names:
+        a = next((x for x in addons
+                  if matching.name_matches(nm, x.get("name") or "")), None)
+        if a and course.get("id") not in (a.get("restricted_course_ids") or []):
+            picked.append(a)
+        else:
+            missing.append(nm)
+    return {"course": course, "addons": picked, "missing": missing,
+            "minutes": int(course.get("duration_min") or 0)
+            + sum(int(a.get("duration_min") or 0) for a in picked)}
+
+
+def _combo_label(combo: dict) -> str:
+    ten = combo["course"].get("name") or ""
+    if combo["addons"]:
+        ten += " + " + ", ".join(a.get("name") or "" for a in combo["addons"])
+    return f"{ten} ({combo['minutes']} phút)"
+
+
+def _bookable_within(api, shop: dict, day: str, party: int, budget: int,
+                     addon_names: tuple[str, ...], t: str) -> dict | None:
+    """Gói DÀI NHẤT vừa quỹ giờ `budget` mà /slots thật sự nhận lúc `t`.
+
+    Ưu tiên giữ add-on khách đã chọn, không vừa mới bỏ add-on rồi mới hạ gói — khách đã
+    nói ra thì đừng tự ý cắt. Chỉ thử `_TRY_LIMIT` gói: đây là câu gợi ý, không đáng dò
+    cả bảng giá."""
+    data = api.get_services(shop["id"], day, party)
+    courses = data.get("courses") or []
+    addons = data.get("addons") or []
+    keep = [a for a in addons
+            if any(matching.name_matches(n, a.get("name") or "") for n in addon_names)]
+    tried = 0
+    for pack in ([keep, []] if keep else [[]]):
+        extra = sum(int(a.get("duration_min") or 0) for a in pack)
+        fit = [c for c in courses
+               if int(c.get("duration_min") or 0) + extra <= budget
+               and not any(c.get("id") in (a.get("restricted_course_ids") or [])
+                           for a in pack)]
+        for c in sorted(fit, key=lambda x: int(x.get("duration_min") or 0), reverse=True):
+            combo = {"course": c, "addons": pack, "missing": [],
+                     "minutes": int(c.get("duration_min") or 0) + extra}
+            if t in _slots_of(api, shop["id"], day, party, combo):
+                return combo
+            tried += 1
+            if tried >= _TRY_LIMIT:
+                return None
+    return None
+
+
+def _shops_serving_at(ctx: QueryCtx, api, shops: list[dict], day: str,
+                      times: list[str], party: int) -> Answer:
+    """"Cửa hàng nào còn mở lúc 19h?" khi tờ đơn ĐÃ có gói dịch vụ."""
+    course_name = ctx.course_name or ""
+    # Khảo sát một lần: shop có gói này không, lúc đó quỹ giờ còn bao nhiêu, /slots có
+    # nhận không. Lọc bằng quỹ giờ TRƯỚC nên chỉ shop còn cơ hội mới tốn lời gọi /slots.
+    survey: dict[str, list[tuple]] = {}
+    for tt in times:
+        rows = []
+        for s in shops:
+            combo = _combo_at(api, s["id"], day, party, course_name, ctx.addon_names)
+            if combo is None:
+                continue                   # shop không có gói này -> không so được, bỏ
+            spans = _spans_at(api, s["id"], day, tt)
+            ok = (_budget(spans, party) >= combo["minutes"]
+                  and tt in _slots_of(api, s["id"], day, party, combo))
+            rows.append((s, combo, spans, ok))
+        survey[tt] = rows
+
+    parts, hit_ids, shown = [], [], None
+    for tt in times:
+        hits = [(s, c) for s, c, _sp, ok in survey[tt] if ok]
+        if not hits:
+            continue
+        shown = shown or hits[0][1]
+        names = []
+        for s, c in hits:
+            thieu = (f"; bên này chưa kèm được {', '.join(c['missing'])}"
+                     if c["missing"] else "")
+            names.append(f"{s['name']} (xong khoảng "
+                         f"{_hhmm(_mins(tt) + c['minutes'])}{thieu})")
+        parts.append(f"lúc {tt} đặt được ở {', '.join(names)}")
+        hit_ids += [s["id"] for s, _c in hits if s["id"] not in hit_ids]
+    if parts:
+        return Answer(f"Ngày {_d(day)} với gói {_combo_label(shown)}, "
+                      f"{'; '.join(parts)} ạ.", shortlist=tuple(hit_ids))
+
+    # Không nơi nào nhận -> nói RÕ vướng ở đâu rồi mới gợi ý, đừng bắt khách tự đoán.
+    # Lấy giờ còn dư nhiều nhất trong các giờ đã hỏi ("7h" trần hỏi cả 07:00 lẫn 19:00).
+    tt = max(times, key=lambda x: max([_budget(sp, party)
+                                       for _s, _c, sp, _o in survey[x]] or [0]))
+    rows = survey[tt]
+    if not rows:
+        return Answer(f"Dạ ngày {_d(day)} em chưa thấy cửa hàng nào có gói anh/chị đã "
+                      "chọn ạ. Anh/chị chọn giúp em gói khác nhé.")
+
+    mine = next((c for s, c, _sp, _o in rows if s["id"] == ctx.shop_id), None) or rows[0][1]
+    need = mine["minutes"]
+    staff = max(len(sp) for _s, _c, sp, _o in rows)
+    best = max(_budget(sp, party) for _s, _c, sp, _o in rows)
+
+    head = f"Ngày {_d(day)} lúc {tt} chưa cửa hàng nào nhận được gói {_combo_label(mine)}"
+    if staff == 0:
+        head += " ạ — giờ đó không cửa hàng nào có nhân viên trực."
+    elif staff < party:
+        head += (f" ạ — lúc đó nhiều nhất chỉ {staff} nhân viên cùng trực, mà anh/chị "
+                 f"đang đặt {party} người.")
+    elif best < need:
+        # Đây chính là điều khách hỏi: gói phải XONG trước lúc nhân viên tan ca.
+        head += (f" ạ — nhân viên trực lúc đó chỉ còn {best} phút nữa là tan ca "
+                 f"({_hhmm(_mins(tt) + best)}), trong khi gói cần {need} phút, bắt đầu "
+                 f"{tt} thì {_hhmm(_mins(tt) + need)} mới xong.")
+    else:
+        head += " ạ — nhân viên giờ đó đã kín khách."
+
+    tips = []
+    cand = max(rows, key=lambda r: _budget(r[2], party))
+    room = _budget(cand[2], party)
+    if room > 0:
+        alt = _bookable_within(api, cand[0], day, party, room, ctx.addon_names, tt)
+        if alt:
+            tips.append(f"Lúc {tt} thì {cand[0]['name']} nhận được gói {_combo_label(alt)}, "
+                        f"xong lúc {_hhmm(_mins(tt) + alt['minutes'])} — vừa kịp giờ nhân "
+                        "viên tan ca ạ.")
+    latest = None
+    for s, combo, _sp, _o in rows:
+        sl = _slots_of(api, s["id"], day, party, combo)
+        if sl:
+            top = max(sl, key=_mins)
+            if latest is None or _mins(top) > _mins(latest[1]):
+                latest = (s, top)
+    if latest:
+        tips.append(f"Còn nếu giữ nguyên gói thì ngày {_d(day)} giờ bắt đầu muộn nhất là "
+                    f"{latest[1]} ở {latest[0]['name']} ạ.")
+
+    return Answer(" ".join([head] + tips),
+                  shortlist=tuple(s["id"] for s, _c, _sp, _o in rows))
+
+
+def shops_open_at(ctx: QueryCtx, api) -> Answer:
+    t = ctx.entities.get("time")
+    day = ctx.entities.get("date") or ctx.date or _today()
+    if not t:
+        # "Cửa hàng nào đang mở hôm nay?" — hỏi theo NGÀY chứ không theo giờ. Hỏi ngược
+        # "khung giờ nào ạ?" là né câu hỏi (khách phản ánh); trả lời thẳng theo ngày.
+        return _shops_open_on(api, day)
+    times = [t]
+    if ctx.time_ambiguous:                      # "7h" trần -> trả lời cả 07:00 lẫn 19:00
+        alt = _plus12(t)
+        if alt:
+            times.append(alt)
+
+    shops = _scope(ctx, api.get_shops())
+    # Đã chốt gói -> "mở cửa" không còn đủ, gói phải nhét vừa phần ca còn lại của nhân
+    # viên (xem khối chú thích ở trên).
+    if ctx.course_name:
+        return _shops_serving_at(ctx, api, shops, day, times, _wanted_party(ctx))
+
+    parts, found, hit_ids = [], False, []
+    for tt in times:
+        matched = [s for s in shops if _has_shift_at(api, s["id"], day, tt)]
+        names = [s["name"] for s in matched]
+        if names:
+            found = True
+            hit_ids += [s["id"] for s in matched if s["id"] not in hit_ids]
+        parts.append(f"lúc {tt} có {', '.join(names)}" if names
+                     else f"lúc {tt} thì không cửa hàng nào làm")
+    # Ngày phải nói RÕ: ca làm đổi theo từng ngày, không nói thì khách hiểu thành "luôn mở".
+    head = f"Ngày {_d(day)}, {'; '.join(parts)} ạ."
+
+    if found:
+        # Trả lời ĐÚNG câu hỏi: có cửa hàng nào. Không kèm giải thích về giờ trống của nhân
+        # viên — khách chỉ hỏi cửa hàng, thêm vào chỉ làm câu dài (khách phản ánh).
+        return Answer(head, shortlist=tuple(hit_ids))
+
+    hours = _day_hours(api, shops, day)
+    if hours:                                   # đừng để câu trả lời cụt ở chỗ "không có"
+        return Answer(f"{head} Hôm đó cửa hàng làm từ {hours[0]} đến {hours[1]}, "
+                      "anh/chị chọn giúp em giờ trong khoảng này nhé.")
+    return Answer(f"{head} Anh/chị thử hỏi giúp em ngày khác nhé.")
 
 
 def shops_list(ctx: QueryCtx, api) -> Answer:
@@ -218,44 +483,6 @@ def shops_by_staff(ctx: QueryCtx, api) -> Answer:
                   suggest={"shop": ok[0]["name"]} if len(ok) == 1 else {})
 
 
-def shops_open_at(ctx: QueryCtx, api) -> Answer:
-    t = ctx.entities.get("time")
-    day = ctx.entities.get("date") or ctx.date or _today()
-    if not t:
-        # "Cửa hàng nào đang mở hôm nay?" — hỏi theo NGÀY chứ không theo giờ. Hỏi ngược
-        # "khung giờ nào ạ?" là né câu hỏi (khách phản ánh); trả lời thẳng theo ngày.
-        return _shops_open_on(api, day)
-    times = [t]
-    if ctx.time_ambiguous:                      # "7h" trần -> trả lời cả 07:00 lẫn 19:00
-        alt = _plus12(t)
-        if alt:
-            times.append(alt)
-
-    shops = _scope(ctx, api.get_shops())
-    parts, found, hit_ids = [], False, []
-    for tt in times:
-        matched = [s for s in shops if _has_shift_at(api, s["id"], day, tt)]
-        names = [s["name"] for s in matched]
-        if names:
-            found = True
-            hit_ids += [s["id"] for s in matched if s["id"] not in hit_ids]
-        parts.append(f"lúc {tt} có {', '.join(names)}" if names
-                     else f"lúc {tt} thì không cửa hàng nào làm")
-    # Ngày phải nói RÕ: ca làm đổi theo từng ngày, không nói thì khách hiểu thành "luôn mở".
-    head = f"Ngày {_d(day)}, {'; '.join(parts)} ạ."
-
-    if found:
-        # Trả lời ĐÚNG câu hỏi: có cửa hàng nào. Không kèm giải thích về giờ trống của nhân
-        # viên — khách chỉ hỏi cửa hàng, thêm vào chỉ làm câu dài (khách phản ánh).
-        return Answer(head, shortlist=tuple(hit_ids))
-
-    hours = _day_hours(api, shops, day)
-    if hours:                                   # đừng để câu trả lời cụt ở chỗ "không có"
-        return Answer(f"{head} Hôm đó cửa hàng làm từ {hours[0]} đến {hours[1]}, "
-                      "anh/chị chọn giúp em giờ trong khoảng này nhé.")
-    return Answer(f"{head} Anh/chị thử hỏi giúp em ngày khác nhé.")
-
-
 # --------------------------------------------------------------------------- #
 #  "Shop A ở đâu?" / "số điện thoại cửa hàng?"                                 #
 # --------------------------------------------------------------------------- #
@@ -321,6 +548,6 @@ def course_price(ctx: QueryCtx, api) -> Answer:
         return Answer(f"Dạ ngày {_d(day)} {sh['name']} không phục vụ nên em chưa xem được "
                       "bảng giá ạ. Anh/chị hỏi giúp em ngày khác nhé.")
     # Cùng định dạng với danh sách gói ở nlg._facts_for cho nhất quán.
-    items = ", ".join(f"{c.get('name')} · {c.get('duration_min')} phút · {c.get('price')}¥"
+    items = ", ".join(f"{c.get('name')} · {c.get('duration_min')} phút · {nlg.format_price(c.get('price'))}"
                       for c in courses)
     return Answer(f"Dạ bảng giá {sh['name']} ạ: {items}.")

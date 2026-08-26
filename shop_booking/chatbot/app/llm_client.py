@@ -33,10 +33,15 @@ class RealLLMClient:
         self.timeout = timeout
 
     def complete(self, system: str, user: str, *, temperature: float = 0.2,
-                 max_tokens: int = 512, response_json: bool = False) -> str:
+                 max_tokens: int = 512, response_json: bool = False,
+                 timeout: float | None = None) -> str:
+        """`timeout` cho phép mỗi chỗ gọi tự đặt hạn riêng: NLU chặn cả lượt chat nên phải
+        ngắn (có rule-based đỡ), NLG chỉ còn GREETING/REPROMPT nên còn ngắn hơn. Không
+        truyền thì dùng self.timeout."""
         # call_id nối dòng request <-> response cùng 1 lời gọi trong log (giống
         # ShopApiClient._request) — nhiều hội thoại chạy đồng thời thì log các lượt xen kẽ nhau.
         call_id = uuid.uuid4().hex[:8]
+        timeout = self.timeout if timeout is None else timeout
         payload = {
             "model": self.model,
             "messages": [
@@ -57,8 +62,8 @@ class RealLLMClient:
         # an toàn. KHÔNG log api_key/header Authorization — đó là secret gọi router.
         # DEBUG chứ không INFO: system prompt ~2000 ký tự, in mỗi lời gọi thì log không đọc
         # nổi. Tóm tắt lượt nằm ở app/turnlog.py; cần soi prompt thì LOG_LEVEL=DEBUG.
-        logger.debug("llm -> [%s] model=%s temperature=%s max_tokens=%s system=%s user=%s",
-                     call_id, self.model, temperature, max_tokens, system, user)
+        logger.debug("llm -> [%s] model=%s temperature=%s max_tokens=%s timeout=%s system=%s user=%s",
+                     call_id, self.model, temperature, max_tokens, timeout, system, user)
 
         req = urllib.request.Request(
             f"{self.base_url}/chat/completions",
@@ -71,7 +76,7 @@ class RealLLMClient:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
                 raw = resp.read().decode("utf-8")
         except urllib.error.HTTPError as e:
             detail = e.read().decode("utf-8", "replace")[:300]
