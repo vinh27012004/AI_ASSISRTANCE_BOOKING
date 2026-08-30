@@ -145,6 +145,25 @@ def _day_hours(api, shops: list[dict], day: str) -> tuple[str, str] | None:
     return _hhmm(lo), _hhmm(hi)
 
 
+# "mở cửa từ mấy giờ tới mấy giờ", "mấy giờ đóng cửa", "giờ làm việc thế nào" — khách hỏi
+# KHUNG GIỜ, không hỏi "chỗ nào còn sáng đèn". Cùng question_type=shops_open_at nên phải
+# phân biệt bằng chính lời khách.
+_ASK_HOURS_RE = re.compile(
+    r"mấy giờ|may gio|lúc nào|luc nao|giờ (?:mở|đóng|làm|mo|dong|lam)"
+    r"|(?:mở|đóng|mo|dong)\s*cửa\s*(?:từ|đến|tới|lúc|tu|den|toi|luc)"
+    r"|giờ giấc|gio giac|khung giờ làm|khung gio lam")
+
+
+def _hours_answer(api, shops: list[dict], day: str, who: str) -> Answer:
+    """Khung giờ làm của `shops` trong ngày. `who` là chủ ngữ đọc lên cho tự nhiên."""
+    hours = _day_hours(api, shops, day)
+    if not hours:
+        return Answer(f"Dạ ngày {_d(day)} {who} không có ca làm nào ạ. "
+                      "Anh/chị thử hỏi giúp em ngày khác nhé.")
+    return Answer(f"Dạ ngày {_d(day)} {who} làm từ {hours[0]} đến {hours[1]} ạ.",
+                  shortlist=tuple(s["id"] for s in shops))
+
+
 def _shops_open_on(api, day: str) -> Answer:
     """Cửa hàng CÓ LÀM trong ngày (có ít nhất một ca) — không xét giờ cụ thể."""
     hits = [s for s in api.get_shops() if _shifts(api, s["id"], day)]
@@ -359,6 +378,14 @@ def shops_open_at(ctx: QueryCtx, api) -> Answer:
     t = ctx.entities.get("time")
     day = ctx.entities.get("date") or ctx.date or _today()
     if not t:
+        # Hỏi KHUNG GIỜ ("Hải Châu mở từ mấy giờ tới mấy giờ?") -> đọc giờ mở/đóng. Trước
+        # đây rơi hết vào _shops_open_on nên bot đáp bằng DANH SÁCH cửa hàng có làm — không
+        # dính gì tới câu hỏi, và trùng y nguyên câu lượt trước (bug thật trong log).
+        if _ASK_HOURS_RE.search((ctx.raw_text or "").lower()):
+            sh = _resolve_shop(ctx, api.get_shops())
+            if sh is not None:
+                return _hours_answer(api, [sh], day, sh["name"])
+            return _hours_answer(api, api.get_shops(), day, "bên em")
         # "Cửa hàng nào đang mở hôm nay?" — hỏi theo NGÀY chứ không theo giờ. Hỏi ngược
         # "khung giờ nào ạ?" là né câu hỏi (khách phản ánh); trả lời thẳng theo ngày.
         return _shops_open_on(api, day)

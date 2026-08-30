@@ -29,7 +29,16 @@ def _data_dir() -> str:
 
 
 def _default_faq_path() -> str:
+    """Ưu tiên thư mục data/faq/ nếu có (kho lớn chia nhiều file), không thì file đơn
+    data/faq.md như cũ — tách file ra không phải sửa .env."""
+    folder = os.path.join(_data_dir(), "faq")
+    if os.path.isdir(folder):
+        return folder
     return os.path.join(_data_dir(), "faq.md")
+
+
+def _default_vector_path() -> str:
+    return os.path.join(_data_dir(), "faq_chroma")
 
 
 @dataclass(frozen=True)
@@ -51,6 +60,10 @@ class Settings:
     log_level: str = "INFO"
     # --- FAQ / retrieval (app/retrieval.py). Corpus rỗng -> làn FAQ tắt hẳn, phần còn
     # lại chạy y như cũ. Retrieval là BM25 thuần, không cấu hình gì thêm.
+    # `faq_generate` bật bước sinh (G) của RAG: chunk tìm được đi qua LLM diễn đạt lại thay
+    # vì trả nguyên văn. Chưa cấu hình router thì answers/faq.py tự tắt, không cần đụng cờ.
+    # Hạn chờ để RIÊNG: bước này nằm giữa câu hỏi và câu trả lời nên hỏng là khách ngồi
+    # đợi, mà lùi về nguyên văn thì có sẵn -> để ngắn như NLG.
     # --- Hạn chờ LLM, tách theo chỗ gọi. Trước đây dùng chung 20s cho cả hai: NLU chặn
     # cả lượt chat nên khách phải ngồi đợi trọn 20 giây rồi mới nhận được câu rule-based.
     # NLU đo thật 2,2–4,4s (log 26/8) -> 8s là gấp đôi đầu, mà xấu nhất giảm 2,5 lần.
@@ -58,6 +71,23 @@ class Settings:
     llm_timeout_nlu: float = 8.0
     llm_timeout_nlg: float = 6.0
     faq_corpus_path: str = ""
+    faq_generate: bool = True
+    llm_timeout_faq: float = 6.0
+    # --- Backend truy xuất. 'bm25' = như cũ, thuần stdlib, không cần cài gì. 'hybrid' =
+    # BM25 + vector (Chroma) hợp nhất bằng RRF rồi xếp lại bằng cross-encoder PhoRanker.
+    # Mặc định 'bm25': gói nặng (~2-3GB) là TÙY CHỌN, máy chưa cài vẫn phải chạy được —
+    # retrieval.build_retriever tự lùi về bm25 nếu import hỏng.
+    rag_backend: str = "bm25"
+    embedding_model: str = "bkai-foundation-models/vietnamese-bi-encoder"
+    rerank_model: str = "itdainb/PhoRanker"
+    # Mỗi nhánh lấy bao nhiêu trước khi hợp nhất, và còn lại bao nhiêu sau khi rerank.
+    retrieve_top_k: int = 10
+    final_top_k: int = 3
+    vector_store_path: str = ""
+
+    @property
+    def use_hybrid(self) -> bool:
+        return self.rag_backend.strip().lower() == "hybrid"
 
     @property
     def use_real_llm(self) -> bool:
@@ -89,4 +119,16 @@ def load_settings() -> Settings:
         # Mặc định trỏ vào data/faq.md cạnh service -> cài xong là FAQ chạy luôn, không
         # phải khai báo gì. Đặt FAQ_CORPUS_PATH= (rỗng) để tắt.
         faq_corpus_path=os.environ.get("FAQ_CORPUS_PATH", _default_faq_path()),
+        # Mặc định BẬT khi đã có router. Đặt FAQ_GENERATE=0 để quay lại trả nguyên văn —
+        # dùng khi cần câu trả lời khớp từng chữ với data/faq.md (vd đang review nội dung).
+        faq_generate=os.environ.get("FAQ_GENERATE", "1").strip().lower()
+        not in ("0", "false", "no", "off", ""),
+        llm_timeout_faq=float(os.environ.get("LLM_TIMEOUT_FAQ", "6")),
+        rag_backend=os.environ.get("RAG_BACKEND", "bm25"),
+        embedding_model=os.environ.get(
+            "EMBEDDING_MODEL", "bkai-foundation-models/vietnamese-bi-encoder"),
+        rerank_model=os.environ.get("RERANK_MODEL", "itdainb/PhoRanker"),
+        retrieve_top_k=int(os.environ.get("RETRIEVE_TOP_K", "10")),
+        final_top_k=int(os.environ.get("FINAL_TOP_K", "3")),
+        vector_store_path=os.environ.get("VECTOR_STORE_PATH", _default_vector_path()),
     )

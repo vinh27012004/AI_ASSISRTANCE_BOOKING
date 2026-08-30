@@ -15,18 +15,25 @@ from app import states as S
 # Câu hỏi ĐANG DỞ, đọc lại sau khi trả lời một câu hỏi ngoài luồng để hội thoại không bị
 # cụt. Cố ý NGẮN, không đọc lại danh sách (shop/giờ/gói): khách vừa thấy ở lượt trước, và
 # đọc lại sẽ phải gọi API lần thứ hai trong cùng một lượt.
+# Câu để TRẦN, chưa viết hoa: `_pending_question` ghép thêm một lời dẫn ở PENDING_LEAD.
+# Bỏ tiền tố "Quay lại ạ," cũ — nó lặp nguyên si ở mọi lượt hỏi-đáp và còn thừa một chữ
+# "ạ" nữa ngay trong câu, đọc lên rất máy móc (khách phản ánh bot nói chưa tự nhiên).
 PENDING_QUESTION = {
-    S.SHOP: "Quay lại ạ, anh/chị muốn đặt ở cửa hàng nào ạ?",
-    S.DATE: "Quay lại ạ, anh/chị muốn đặt ngày nào ạ?",
-    S.PARTY_SIZE: "Quay lại ạ, anh/chị đặt cho mấy người ạ?",
-    S.COURSE: "Quay lại ạ, anh/chị chọn gói dịch vụ nào ạ?",
-    S.ADDON: "Quay lại ạ, anh/chị có thêm dịch vụ bổ sung nào không ạ?",
-    S.THERAPIST: "Quay lại ạ, anh/chị có muốn chỉ định nhân viên không ạ?",
-    S.SLOT: "Quay lại ạ, anh/chị chọn khung giờ nào ạ?",
-    S.CONTACT: "Quay lại ạ, anh/chị cho em xin số điện thoại và email nhé.",
-    S.CONFIRM: "Quay lại ạ, anh/chị xác nhận đặt lịch nhé?",
+    S.SHOP: "anh/chị muốn đặt ở cửa hàng nào ạ?",
+    S.DATE: "anh/chị muốn đặt ngày nào ạ?",
+    S.PARTY_SIZE: "anh/chị đặt cho mấy người ạ?",
+    S.COURSE: "anh/chị chọn gói dịch vụ nào ạ?",
+    S.ADDON: "anh/chị có muốn thêm dịch vụ bổ sung nào không ạ?",
+    S.THERAPIST: "anh/chị có muốn chỉ định nhân viên không ạ?",
+    S.SLOT: "anh/chị chọn khung giờ nào ạ?",
+    S.CONTACT: "anh/chị cho em xin số điện thoại và email nhé.",
+    S.CONFIRM: "anh/chị xác nhận đặt lịch giúp em nhé?",
 }
-PENDING_QUESTION_DEFAULT = "Anh/chị cần em hỗ trợ gì thêm không ạ?"
+PENDING_QUESTION_DEFAULT = "anh/chị cần em hỗ trợ gì thêm không ạ?"
+
+# Lời dẫn xoay vòng theo số lượt (deterministic — vẫn test được). Cùng một câu hỏi bị đọc
+# lại nhiều lượt thì ít nhất cách dẫn vào phải khác nhau.
+PENDING_LEAD = ("Mình quay lại nhé, ", "Vậy ", "Còn ", "Giờ ")
 
 # Chỉ dẫn cho LLM (bước ⑤).
 INSTRUCTION = {
@@ -79,7 +86,7 @@ FAKE = {
     "ERROR": "{message}",
     # Trả lời câu hỏi ngoài luồng rồi đọc lại câu đang dở (tờ đơn KHÔNG đổi).
     "INFO": "{noi_dung} {cau_hoi}",
-    "OUT_OF_SCOPE": "Dạ phần này em chưa hỗ trợ được ạ, em chỉ giúp đặt lịch thôi. {cau_hoi}",
+    "OUT_OF_SCOPE": "Dạ chỗ này em chưa hỗ trợ được ạ, em chủ yếu giúp anh/chị đặt lịch thôi. {cau_hoi}",
 }
 
 

@@ -1,26 +1,63 @@
 # Corpus FAQ — làn QUERY của chatbot
 
-Mỗi mục `## ` là MỘT câu trả lời trọn vẹn, được trả cho khách **nguyên văn** (không qua
-LLM viết lại — xem `app/answers/faq.py`). Vì vậy:
+Mỗi mục `## ` là MỘT câu trả lời trọn vẹn. Mặc định nó đi qua LLM diễn đạt lại cho khớp
+câu khách hỏi (bước G — `app/answers/faq.py::_augment`), nhưng **mọi nhánh hỏng đều lùi về
+trả nguyên văn**: router lỗi, quá hạn chờ, model tự nhận không đủ dữ kiện, hoặc chạy với
+`FAQ_GENERATE=0`. Vì vậy vẫn viết như thể sẽ được đọc nguyên văn:
 
 - Viết bằng giọng trợ lý, 1–3 câu, kết thúc gọn. Câu đọc lại việc đang dở sẽ được nối
   ngay phía sau theo template `INFO` = `"{noi_dung} {cau_hoi}"`.
 - **Chỉ viết CHÍNH SÁCH / QUY TRÌNH.** Tuyệt đối không ghi giờ mở cửa, giá, địa chỉ, số
   điện thoại hay lịch nghỉ vào đây — mấy thứ đó thay đổi liên tục và đã có resolver gọi
   thẳng `shop_api` (`shop_info.py`, `location.py`). Ghi vào đây là dữ liệu chết, sẽ sai.
+  Quy ước này còn là thứ giữ cho bước G an toàn: chunk không có số liệu sống thì LLM
+  không có gì để chép sai.
 - Tiêu đề đặt đúng như cách KHÁCH hỏi (tiêu đề được đánh trọng số gấp đôi khi tìm kiếm).
 - Dòng bắt đầu bằng `> ` là **cách hỏi khác**: chỉ dùng để tìm kiếm, KHÔNG đọc cho khách.
   Đây là núm chỉnh chất lượng — thấy bot không nhận ra câu nào thì thêm một dòng `> `.
-- File này là **nguồn tin cậy, review qua git**. Đừng làm bảng cho staff sửa trong trang
+- Kho này là **nguồn tin cậy, review qua git**. Đừng làm bảng cho staff sửa trong trang
   admin: nội dung ở đây đi thẳng vào câu bot nói, ai sửa được file là nói thay bot được.
+- Chỉ tiêu đề `## ` mới thành một mục. Tiêu đề phụ trong phần hướng dẫn phải dùng `###`,
+  không thì nó bị đếm thành một mục FAQ rỗng nghĩa (đã dính đúng lỗi này lúc viết).
 
-Thêm câu hỏi mới = thêm một mục `## ` ở dưới. Không phải sửa code, không phải thêm luật
-vào `nlu._detect_question`.
+### Bố cục thư mục
 
-Kiểm tra nhanh sau khi sửa file này:
+Kho nằm ở `data/faq/`, chia theo chủ đề — mỗi file một mảng, gộp lại thành một corpus:
+
+| File | Nội dung |
+|---|---|
+| `co-ban.md` | Quy ước viết (chính file này) + các mục nền đầu tiên |
+| `dat-lich.md` | Quy trình đặt, chọn giờ, đặt hộ, đặt nhiều buổi |
+| `nhom.md` | Đi nhóm: số người, dùng chung dịch vụ, xếp chỗ |
+| `dich-vu.md` | Gói chính, dịch vụ thêm, thời lượng |
+| `nhan-vien.md` | Chỉ định người, giới tính, đổi người |
+| `sua-huy.md` | Sửa, hủy, xác thực, tra lại lịch |
+| `thong-tin-khach.md` | Email, số điện thoại, thành viên, dữ liệu |
+| `tro-giup.md` | Phạm vi hỗ trợ, sự cố, khiếu nại |
+
+Thêm câu hỏi mới = thêm một mục `## ` vào file hợp chủ đề, hoặc tạo file `.md` mới trong
+thư mục này. Không phải sửa code, không phải thêm luật vào `nlu._detect_question`.
+
+### Cái bẫy khi kho lớn dần
+
+Bigram phía câu hỏi (tiêu đề + dòng `> `) là thứ `_confident` dùng để quyết định nhận hay
+từ chối. Kho càng nhiều mục thì càng dễ có hai mục **giành nhau một bigram**, và mục mới có
+thể cướp câu hỏi vốn thuộc về mục cũ — hoặc tệ hơn, cướp một câu lẽ ra phải bị TỪ CHỐI.
+
+Ba lần đã gặp thật khi kho lên 82 mục (28/8):
+
+- `"cho tôi đặt lịch"` là câu ĐẶT CHỖ, phải rơi về luồng đặt lịch chứ không phải tra cứu.
+  Bất kỳ tiêu đề/alias nào chứa cụm `đặt lịch` cũng cướp mất nó → dùng `đặt chỗ` thay.
+- `"hôm nay mấy giờ đóng cửa"` là dữ liệu SỐNG, phải đi qua `shop_api`. Một alias viết
+  `"vì sao chỉ có mấy giờ này"` đủ để cướp nó qua bigram `mấy_giờ`.
+- `"tôi muốn chọn nhân viên phục vụ"` bị mục nói về `phục vụ hai khách cùng lúc` giành mất.
+
+Vì vậy: **thêm mục xong luôn chạy `check_faq.py`**, và đọc phần `MUST_REJECT` trước phần
+`MUST_ANSWER` — trả lời tự tin mà lạc chủ đề tệ hơn nói "em chưa hỗ trợ được".
 
 ```bash
-python tests/check_faq.py          # bảng câu hỏi mẫu -> mục nào được chọn
+python tests/check_faq.py          # 60 câu dò + recall@1/@3 + từ chối oan
+python tests/check_faq_gen.py      # chất lượng bước sinh (cần router)
 python tests/test_chatbot.py       # bộ test đầy đủ
 ```
 ## Hủy lịch thì làm thế nào, có mất phí không
@@ -101,6 +138,9 @@ người phù hợp để cả nhóm được phục vụ cùng giờ. Chỉ khi
 > nhóm chọn gói khác nhau
 > mỗi người một dịch vụ 
 > nhóm khác gói
+> add-on riêng từng người
+> mỗi người thêm món khác
+> nhóm chọn thêm riêng
 
 Dạ cả nhóm dùng chung một gói chính và chung một bộ add-on, cùng khung giờ ạ. Ai muốn
 dịch vụ khác thì mình tách ra đặt thành lịch riêng giúp em ạ.

@@ -35,8 +35,9 @@ HANDLED = set(RESOLVERS) | {"other"}
 
 
 def reload_corpus(retriever) -> None:
-    """Nạp lại retriever FAQ (dùng khi sửa data/faq.md lúc dev)."""
-    faq.configure(retriever)
+    """Nạp lại retriever FAQ (dùng khi sửa data/faq.md lúc dev). Chỉ đổi corpus — dùng
+    `faq.configure` ở đây sẽ gỡ mất router và tắt im bước sinh."""
+    faq.set_retriever(retriever)
 
 
 def resolve(ctx: QueryCtx, api) -> Answer:

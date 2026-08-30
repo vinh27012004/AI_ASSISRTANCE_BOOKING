@@ -58,7 +58,15 @@ def create_app() -> Flask:
             "session": "redis" if settings.use_redis else "memory",
             "faq": {
                 "chunks": len(retriever.chunks) if retriever else 0,
-                "retrieval": "bm25",
+                # Báo backend THỰC TẾ đang chạy, không phải cái đặt trong .env: yêu cầu
+                # hybrid mà thiếu gói thì retrieval lùi về bm25 trong im lặng, ở đây là chỗ
+                # duy nhất thấy được điều đó mà không phải đi đọc log.
+                "retrieval": ("hybrid" if (retriever and retriever.is_hybrid) else "bm25"),
+                "retrieval_yeu_cau": settings.rag_backend,
+                # Bước sinh chỉ chạy khi CÓ router VÀ cờ bật -> nói rõ đang ở chế độ nào,
+                # khỏi phải đoán vì sao câu trả lời khớp/không khớp từng chữ với faq.md.
+                "generation": ("llm" if (settings.faq_generate and settings.use_real_llm)
+                               else "nguyên văn"),
             },
         })
 

@@ -10,7 +10,7 @@ Thiết kế đầy đủ: [`../../UC-US-BA-APIDESIGN/detail-design/DD_chatbot.m
 
 ```bash
 # từ thư mục chatbot/ (dùng chung .venv ở gốc repo)
-cp .env.example .env          # điền SHOP_API_CHANNEL_KEY (+ LLM_* nếu có router)
+cp .env.example .env          # điền LLM_* nếu có router; mặc định chạy được không cần gì
 python -m flask --app wsgi run --port 5100
 #   POST http://127.0.0.1:5100/chat/message   {conversation_id, text, lang}
 #   GET  http://127.0.0.1:5100/health
@@ -42,7 +42,7 @@ Nhờ vậy lõi state machine + PII test được không cần mock LLM (bướ
 | `session.py` | Session + store (TTL sliding 30', rút vault sau 2' — Q5) |
 | `shop_api_client.py` | Gọi endpoint GĐ1 như client **public** (giống FE web) — không auth kênh riêng |
 | `answers/` | Tủ tra cứu — bảng "loại câu hỏi → gọi API nào" (xem mục dưới) |
-| `retrieval.py` · `answers/faq.py` · `data/faq.md` | RAG: BM25 thuần + chốt độ tự tin (xem mục dưới) |
+| `retrieval.py` · `answers/faq.py` · `data/faq.md` | RAG: BM25 (+ vector/rerank tuỳ chọn) → chốt độ tự tin → sinh câu (xem mục dưới) |
 | `main.py` · `wsgi.py` | Flask `POST /chat/message` (§2.1, Q3) |
 
 ## Hai làn: điền đơn ↔ hỏi thông tin
@@ -78,37 +78,85 @@ Vị trí trong luồng: khi không resolver nào nhận, `answers.resolve` giao
 `_is_question` cũng đã được nới — câu rõ ràng là hỏi nhưng không gọi được tên loại thì gán
 `question_type="faq"` thay vì rơi tuột về luồng đặt lịch.
 
-**Retrieval** (`retrieval.py`) là **BM25 thuần stdlib** — không mạng, không key, không
-phụ thuộc ngoài. Xếp hạng xong còn một chốt nữa là `Retriever._confident`: độ phủ âm tiết
-nội dung ≥ 0.34 **và** trùng ít nhất một bigram với PHÍA CÂU HỎI của mục (tiêu đề + alias).
-Không qua chốt → từ chối, vì bot trả lời tự tin mà sai chủ đề còn tệ hơn nói "em chưa hỗ
-trợ được".
+### R — truy xuất, hai backend
 
-Nhánh vector từng có, đã gỡ ngày 26/8. Đo trên 8 câu khách nói tự nhiên: BM25 trả lời được
-3; với 5 câu còn lại, ép thẳng chunk ĐÚNG lên hạng 1 (giả lập một nhánh vector *hoàn hảo*)
-thì cả 5 **vẫn** bị `_confident` chặn — chốt đó thuần từ vựng và có quyền phủ quyết cuối
-cùng, nhánh vector chỉ xếp lại thứ hạng. Tức là nó cứu được 0/8. Thêm một dòng `> ` vào
-`data/faq.md` thì cứu 5/5.
+Chọn bằng `RAG_BACKEND` trong `.env`:
 
-> Muốn thêm semantic recall (embedding, hay reranker kiểu PhoRanker) thì phải sửa **cả
-> hai**: dựng nhánh mới VÀ nới `_confident` cho ứng viên đến từ nhánh đó. Bật mỗi nhánh
-> mới là tiêu tài nguyên vô ích.
+| | `bm25` (mặc định) | `hybrid` |
+|---|---|---|
+| Cách tìm | BM25 thuần stdlib | BM25 + vector (Chroma) hợp nhất bằng RRF, xếp lại bằng cross-encoder PhoRanker |
+| Cần cài | không gì cả | `chromadb sentence-transformers pyvi` (~2–3GB) |
+| Boot | tức thì | ~10–30s nạp model, giữ ~1–1,5GB RAM |
+| PII | không có gì rời hệ thống | vẫn không — cả hai model chạy **cục bộ** |
 
-Bốn ràng buộc **không được nới**:
+Thiếu gói hoặc tải model hỏng → tự lùi về `bm25` kèm cảnh báo trong log; `GET /health` cho
+biết backend **thực tế** đang chạy chứ không phải cái ghi trong `.env`.
+
+Xếp hạng xong còn một chốt nữa là `Retriever._confident`: độ phủ âm tiết nội dung ≥ 0.34
+**và** trùng ít nhất một bigram với PHÍA CÂU HỎI của mục (tiêu đề + alias). Không qua chốt →
+từ chối, vì bot trả lời tự tin mà sai chủ đề còn tệ hơn nói "em chưa hỗ trợ được".
+
+> **Bài học 26/8 — đừng lặp lại.** Nhánh vector từng có rồi bị gỡ vì đo ra cứu **0/8** câu.
+> Nguyên nhân không phải vector kém: ép thẳng chunk ĐÚNG lên hạng 1 (giả lập một nhánh vector
+> *hoàn hảo*) thì cả 5 câu **vẫn** bị `_confident` chặn — chốt đó thuần từ vựng và có quyền
+> phủ quyết cuối. Lần này nhánh vector đi kèm `_confident(strong=…)`: ứng viên được PhoRanker
+> chấm trên `_RERANK_STRONG` được **miễn điều kiện bigram**, nhưng vẫn phải qua điều kiện độ
+> phủ. Dựng nhánh mới mà quên nới chốt = lặp lại đúng thất bại cũ.
+>
+> Phép đo đó còn một điều kiện biên: nó làm trên corpus **21 mục**, nơi BM25 gần như luôn xếp
+> đúng hạng 1 (`recall@1` = 100%, chênh `recall@3` = 0%). Ở cỡ đó hybrid **không có gì để
+> cứu**. Giá trị của nó chỉ xuất hiện khi corpus phình to — và phải đo lại bằng
+> `--backend hybrid` chứ không suy từ kết luận cũ.
+
+### G — sinh câu
+
+Chunk tìm được đi qua LLM diễn đạt lại cho khớp câu khách hỏi (`answers/faq.py::_augment`),
+thay vì đọc nguyên văn như trước. Tắt bằng `FAQ_GENERATE=0`; chưa cấu hình router thì tự tắt.
+
+Bước này mang lại ba rủi ro mà bản "trả nguyên văn" vốn miễn nhiễm, nên nó có **sáu hàng
+rào**, và mọi hàng rào đều lùi về nguyên văn chunk — hành vi cũ thành lưới đỡ, không bị thay
+thế: router lỗi/quá hạn · model in `KHONG_DU_THONG_TIN` · lọt markdown · tự đẻ `{{...}}` ·
+lan man quá `2×gốc+120` · cờ tắt. Lý do lùi được in trong khối log của lượt đó.
+
+Chống bịa dựa vào ràng buộc số 1 bên dưới: chunk không chứa số liệu sống thì model không có
+gì để chép sai. Chống prompt injection: system prompt tuyên bố `doan_van` là DỮ LIỆU, và
+corpus là file review qua git chứ không phải nội dung người lạ.
+
+Ba ràng buộc **không được nới**:
 
 1. **Chỉ chính sách/quy trình vào corpus.** Giờ mở cửa, giá, ngày nghỉ, địa chỉ vẫn phải đi
-   qua `shop_api` — dữ liệu sống, ghi vào file là sai ngay hôm sau.
-2. **Chunk trả cho khách nguyên văn, không qua LLM.** Đổi lại: không bịa, không thêm round
-   trip, và chunk không bao giờ vào prompt nên không có đường prompt injection gián tiếp.
-3. **Truy vấn là text ĐÃ MASK** (`ctx.raw_text`) — hiện retrieval chạy nội bộ, nhưng chốt
-   này phải còn nguyên cho ngày cắm thêm nhánh gọi ra ngoài.
-4. **Corpus review qua git.** Đừng làm bảng cho staff sửa trong admin: ai sửa được file là
+   qua `shop_api` — dữ liệu sống, ghi vào file là sai ngay hôm sau. Từ khi có bước G thì đây
+   còn là ràng buộc **an toàn**, không chỉ gọn gàng.
+2. **Truy vấn là text ĐÃ MASK** (`ctx.raw_text`). Trước đây là phòng xa vì retrieval chạy nội
+   bộ; từ khi có bước G thì câu hỏi **thật sự** bay sang router, nên chốt này thành bắt buộc.
+3. **Corpus review qua git.** Đừng làm bảng cho staff sửa trong admin: ai sửa được file là
    nói thay bot được.
 
-Sửa `data/faq.md` xong thì chạy `python tests/check_faq.py` — nó in bảng câu hỏi mẫu → mục
-nào được chọn, và có cả danh sách câu **phải bị từ chối** (bot trả lời tự tin nhưng lạc chủ
-đề còn tệ hơn bot nói "em chưa hỗ trợ được"). Không nhận ra câu nào thì thêm dòng `> ` vào
-mục tương ứng.
+### Corpus và thước đo
+
+Corpus là `data/faq.md`, **hoặc** cả thư mục `data/faq/` nếu nó tồn tại (kho vài trăm mục
+trong một file thì không review nổi qua git). Mỗi chunk nhớ file nguồn của nó, in kèm trong
+log để biết câu sai đến từ đâu.
+
+Sửa corpus xong thì chạy:
+
+```bash
+python tests/check_faq.py                     # bảng đối chiếu + 3 chỉ số
+python tests/check_faq.py --backend hybrid    # so kèo với BM25 thuần
+python tests/check_faq.py --backend hybrid --calibrate   # dò ngưỡng _RERANK_STRONG
+python tests/check_faq_gen.py                 # đo chữ G (cần router)
+```
+
+Ba chỉ số ở cuối `check_faq.py`, và khoảng cách giữa hai cái đầu mới là thứ đáng đọc:
+
+- **`recall@3 − recall@1`** — mục đúng đã tìm ra nhưng xếp sai hạng. Đây đúng là phần việc
+  reranker làm được, và **chỉ chừng đó thôi**. Chênh 0% thì đừng bật hybrid.
+- **từ chối oan** — đúng hạng 1 mà `_confident` chặn. Cao thì vấn đề ở chốt chặn, nới
+  `_confident` mới đúng thuốc; thêm nhánh mới là vô ích (bài học 26/8).
+
+Danh sách `MUST_REJECT` quan trọng ngang `MUST_ANSWER` và **phải giữ 10/10 ở mọi backend,
+mọi ngưỡng** — bot trả lời tự tin nhưng lạc chủ đề tệ hơn mọi cải thiện recall cộng lại.
+Không nhận ra câu nào thì thêm dòng `> ` vào mục tương ứng: rẻ hơn mọi thứ khác trong trang này.
 
 ## Đọc log
 

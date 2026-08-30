@@ -96,7 +96,9 @@ class Orchestrator:
         # duy nhất cầm Settings nên cũng là chỗ duy nhất dựng được retriever. Corpus rỗng
         # -> answers.faq tự tắt, luồng còn lại không đổi.
         self._faq_retriever = retrieval.build_retriever(settings)
-        faq.configure(self._faq_retriever)
+        faq.configure(self._faq_retriever, llm,
+                      generate=settings.faq_generate,
+                      timeout=settings.llm_timeout_faq)
 
     # ------------------------------------------------------------------ #
     #  Vòng 1 lượt                                                        #
@@ -200,7 +202,7 @@ class Orchestrator:
             # GÁC CỬA — lượt này là CÂU HỎI thông tin hay giá trị điền vào tờ đơn? Phải xét
             # TRƯỚC khối booking_code bên dưới: đặt xong rồi mà khách hỏi "shop ở đâu" thì
             # intent=book sẽ bị hiểu thành muốn sửa lịch.
-            if self._is_question(parsed, user_text):
+            if self._is_question(parsed, user_text, asked):
                 turnlog.lane("QUERY", parsed["question_type"], parsed["intent"])
                 self._note_intent(session, f"{parsed['intent']}:{parsed['question_type']}")
                 return self._answer_query(session, parsed, masked, asked)
@@ -298,7 +300,23 @@ class Orchestrator:
     # ------------------------------------------------------------------ #
     _OFFTOPIC_LIMIT = 3               # lạc đề liên tiếp bấy nhiêu lượt -> mời gọi cửa hàng
 
-    def _is_question(self, parsed: dict, user_text: str) -> bool:
+    # Ô trên tờ đơn mà từng state đang hỏi -> tên entity NLU trả về. Dùng để nhận ra
+    # khách vừa TRẢ LỜI đúng câu bot hỏi (xem _is_question).
+    _ASKED_ENTITY = {
+        S.SHOP: "shop", S.DATE: "date", S.PARTY_SIZE: "party_size", S.COURSE: "course",
+        S.ADDON: "addons", S.THERAPIST: "therapist", S.SLOT: "time", S.CONFIRM: "confirm",
+    }
+
+    def _answers_pending_question(self, parsed: dict, asked: str) -> bool:
+        """Lượt này có điền đúng ô bot đang hỏi không? CHỈ tính khi NLU không thấy câu hỏi
+        nào (intent != ask_info và question_type rỗng) — bằng không "Hải Châu mở mấy giờ?"
+        lúc đang hỏi cửa hàng cũng bị coi là câu trả lời."""
+        if parsed.get("intent") == "ask_info" or parsed.get("question_type"):
+            return False
+        key = self._ASKED_ENTITY.get(asked)
+        return bool(key and (parsed.get("entities") or {}).get(key) is not None)
+
+    def _is_question(self, parsed: dict, user_text: str, asked: str = "") -> bool:
         """Ưu tiên luồng đặt lịch: đoán nhầm thành "hỏi" chỉ làm bot trả lời thừa, đoán
         nhầm ngược lại làm hỏng cả phiên đặt. Nghi ngờ -> coi là điền đơn.
 
@@ -306,6 +324,12 @@ class Orchestrator:
         "Hải Châu" và "course_price" cho "Gói đầu tiên" — toàn là câu khách TRẢ LỜI. Phải có
         thêm dấu hiệu hỏi trong chính câu nói."""
         qt = parsed.get("question_type")
+        # Khách trả lời đúng ô đang hỏi, chỉ kèm tiểu từ nghi vấn ("28/8 chứ sao?", "3 người
+        # được không?") -> dấu "?" kéo tuột sang làn QUERY, FAQ không tra ra gì và bot đáp
+        # "em chưa hỗ trợ được" ngay giữa luồng đặt (bug thật trong log). Câu ĐIỀN ĐƯỢC ô
+        # đang hỏi luôn được ưu tiên hiểu là câu trả lời.
+        if self._answers_pending_question(parsed, asked):
+            return False
         # Chưa có FAQ thì loại nào không có trong bảng là hết đường -> chặn ngay như cũ.
         if qt not in answers.HANDLED and not faq.is_ready():
             return False
@@ -385,8 +409,13 @@ class Orchestrator:
     @staticmethod
     def _pending_question(session: Session, asked: str) -> str:
         if S.is_terminal(session.state):
-            return templates.PENDING_QUESTION_DEFAULT
-        return templates.PENDING_QUESTION.get(asked, templates.PENDING_QUESTION_DEFAULT)
+            q = templates.PENDING_QUESTION_DEFAULT
+        else:
+            q = templates.PENDING_QUESTION.get(asked, templates.PENDING_QUESTION_DEFAULT)
+        # Xoay lời dẫn theo số lượt: khách hỏi ba câu liền thì ba lần đọc lại cùng một câu
+        # hỏi cũng phải khác cách vào, không thì nghe như băng ghi âm.
+        lead = templates.PENDING_LEAD[session.turn_count % len(templates.PENDING_LEAD)]
+        return lead + q
 
     # ------------------------------------------------------------------ #
     #  Bước ④ — hành động theo state                                      #

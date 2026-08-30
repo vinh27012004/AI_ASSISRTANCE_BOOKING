@@ -23,6 +23,7 @@ from app import state_machine as sm
 from app import states as S
 from app.answers import faq
 from app.config import Settings
+from app.llm_client import LLMError
 from app.orchestrator import Orchestrator
 from app.session import InMemorySessionStore, Session, Slots
 from app.shop_api_client import ShopApiError
@@ -1261,6 +1262,36 @@ def test_shops_open_without_time_answers_by_day():
           "đọc các cửa hàng có làm trong ngày")
 
 
+def test_shop_opening_hours_question():
+    """"Hải Châu mở cửa từ mấy giờ tới mấy giờ?" hỏi KHUNG GIỜ của MỘT cửa hàng. Trước đây
+    rơi hết vào nhánh "cửa hàng nào có làm hôm nay" -> bot đọc lại y nguyên câu lượt trước,
+    không dính gì tới câu hỏi (log thật)."""
+    api = StubApi()                                   # shop2 làm 12:00-21:00
+    orch = _orch(api)
+    orch.handle_turn("ch1", "")
+    r = orch.handle_turn("ch1", "Hải Châu mở cửa từ mấy giờ tới mấy giờ hôm nay ?")
+    check("12:00" in r.reply_text and "21:00" in r.reply_text,
+          f"phải đọc giờ mở/đóng của Hải Châu: {r.reply_text!r}")
+    check("Shop A" not in r.reply_text, "không được kể tên cửa hàng khách không hỏi")
+
+
+def test_answer_with_question_mark_stays_in_flow():
+    """Khách trả lời đúng ô đang hỏi nhưng kèm tiểu từ nghi vấn ("28/8 chứ sao?") — dấu "?"
+    từng kéo tuột sang làn QUERY và bot đáp "em chưa hỗ trợ được" ngay giữa luồng đặt."""
+    orch = _orch(StubApi())
+    parsed = {"intent": "book", "question_type": None,
+              "entities": {"date": "2026-08-28", "confirm": "yes"}}
+    check(orch._is_question(parsed, "28/8 chứ sao ?", S.DATE) is False,
+          "câu điền được ô ĐANG HỎI là câu trả lời, không phải câu hỏi")
+    check(orch._answers_pending_question(parsed, S.SHOP) is False,
+          "ô đang hỏi là cửa hàng thì câu này không trả lời được -> không ưu tiên làn TASK")
+    # Khách HỎI thật thì không được nuốt, dù NLU có trích ra tên cửa hàng.
+    hoi = {"intent": "ask_info", "question_type": "shops_open_at",
+           "entities": {"shop": "Hải Châu"}}
+    check(orch._is_question(hoi, "Hải Châu mở mấy giờ ?", S.SHOP) is True,
+          "câu hỏi giờ mở cửa vẫn phải đi làn QUERY dù đang hỏi cửa hàng")
+
+
 def test_shops_list_question():
     """"Bên mình có các cửa hàng nào?" — câu cơ bản nhất, trước đây rơi vào 'chưa hỗ trợ'."""
     api = StubApi()
@@ -1396,8 +1427,9 @@ def test_shop_with_no_shifts_routes_back_to_shop():
 # --------------------------------------------------------------------------- #
 #  FAQ / retrieval (BM25 thuần) — app/retrieval.py                             #
 # --------------------------------------------------------------------------- #
+# Kho thật của service: thư mục data/faq/ gồm nhiều file .md theo chủ đề.
 _FAQ_CORPUS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                           "data", "faq.md")
+                           "data", "faq")
 
 
 def _settings_faq(**kw):
@@ -1501,6 +1533,151 @@ def test_faq_query_is_masked_before_retrieval():
     check(seen, "retriever phải được gọi")
     check("0901234567" not in seen[0], f"SĐT LỌT RA retriever: {seen[0]!r}")
     check("{{phone_" in seen[0], f"phải thấy placeholder: {seen[0]!r}")
+
+
+class _StubFaqLLM:
+    """Router giả CHỈ phục vụ bước sinh của FAQ. Lời gọi của NLU/NLG bị từ chối để hai bước
+    đó rơi về nhánh offline sẵn có — nhờ vậy test cô lập đúng chữ G, không lẫn với ①⑥.
+    `reply` là chuỗi trả về, hoặc Exception để mô phỏng router hỏng."""
+
+    def __init__(self, reply):
+        self.reply = reply
+        self.faq_calls = []
+
+    def complete(self, system, user, **kw):
+        if "doan_van" not in user:                 # ① NLU / ⑥ NLG -> để chúng tự lùi
+            raise LLMError("stub: chỉ phục vụ bước sinh FAQ")
+        self.faq_calls.append((system, user))
+        if isinstance(self.reply, Exception):
+            raise self.reply
+        return self.reply
+
+
+def _orch_faq_gen(llm, **settings_kw):
+    return Orchestrator(InMemorySessionStore(), StubApi(), llm,
+                        _settings_faq(**settings_kw))
+
+
+def test_faq_generation_rewrites_chunk():
+    """Bước G: chunk đi qua LLM diễn đạt lại cho khớp câu hỏi, không đọc nguyên văn nữa."""
+    llm = _StubFaqLLM("Dạ anh chị hủy trước giờ hẹn 1 tiếng là được ạ.")
+    orch = _orch_faq_gen(llm)
+    _drive(orch, "fg1", "", "Shop A")
+    r = orch.handle_turn("fg1", "Tôi muốn hủy lịch thì có mất phí không ạ?")
+    check(llm.faq_calls, "phải gọi router cho bước sinh")
+    check("hủy trước giờ hẹn 1 tiếng là được" in r.reply_text,
+          f"phải dùng câu do LLM sinh: {r.reply_text!r}")
+    check("trang quản lý đặt chỗ" not in r.reply_text,
+          f"không còn là bản nguyên văn: {r.reply_text!r}")
+    # Chunk là DỮ LIỆU trong prompt, và câu hỏi phải ở dạng đã mask.
+    check("doan_van" in llm.faq_calls[0][1], "chunk phải được đưa vào prompt")
+    check("0901234567" not in llm.faq_calls[0][1], "câu gửi router phải đã mask")
+
+
+def test_faq_generation_falls_back_when_router_dies():
+    """Router hỏng KHÔNG được làm mất câu trả lời — lùi về nguyên văn như trước khi có G."""
+    orch = _orch_faq_gen(_StubFaqLLM(LLMError("router 503")))
+    _drive(orch, "fg2", "", "Shop A")
+    r = orch.handle_turn("fg2", "Tôi muốn hủy lịch thì có mất phí không ạ?")
+    check("1 tiếng" in r.reply_text, f"phải trả nguyên văn chunk: {r.reply_text!r}")
+
+
+def test_faq_generation_refusal_falls_back():
+    """Model tự nhận đoạn văn không đủ -> lấy bản gốc chứ không đẩy chuỗi cờ ra cho khách."""
+    orch = _orch_faq_gen(_StubFaqLLM("KHONG_DU_THONG_TIN"))
+    _drive(orch, "fg3", "", "Shop A")
+    r = orch.handle_turn("fg3", "Tôi muốn hủy lịch thì có mất phí không ạ?")
+    check("KHONG_DU_THONG_TIN" not in r.reply_text, f"rò chuỗi cờ: {r.reply_text!r}")
+    check("1 tiếng" in r.reply_text, f"phải trả nguyên văn chunk: {r.reply_text!r}")
+
+
+def test_faq_generation_rejects_invented_placeholder():
+    """Model tự đẻ {{...}} thì pii.unmask không giải được -> khách thấy nguyên ngoặc nhọn."""
+    orch = _orch_faq_gen(_StubFaqLLM("Dạ anh chị gọi {{phone_9}} để hủy trước 1 tiếng ạ."))
+    _drive(orch, "fg4", "", "Shop A")
+    r = orch.handle_turn("fg4", "Tôi muốn hủy lịch thì có mất phí không ạ?")
+    check("{{phone_9}}" not in r.reply_text, f"rò placeholder bịa: {r.reply_text!r}")
+    check("trang quản lý đặt chỗ" in r.reply_text, f"phải lùi về nguyên văn: {r.reply_text!r}")
+
+
+def test_faq_generation_kill_switch():
+    """FAQ_GENERATE=0 -> có router vẫn không gọi, trả nguyên văn khớp từng chữ với faq.md."""
+    llm = _StubFaqLLM("câu này không được xuất hiện")
+    orch = _orch_faq_gen(llm, faq_generate=False)
+    _drive(orch, "fg5", "", "Shop A")
+    r = orch.handle_turn("fg5", "Tôi muốn hủy lịch thì có mất phí không ạ?")
+    check(not llm.faq_calls, "cờ tắt thì KHÔNG được gọi router")
+    check("1 tiếng" in r.reply_text, f"phải trả nguyên văn: {r.reply_text!r}")
+
+
+def test_faq_corpus_from_directory(tmp=None):
+    """Kho vài trăm mục trong MỘT file thì không review nổi qua git -> load_corpus phải
+    nạp được cả thư mục, và mỗi chunk phải nhớ nó đến từ file nào."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        with open(os.path.join(d, "huy-doi.md"), "w", encoding="utf-8") as f:
+            f.write("## Hủy lịch có mất phí không\n> hủy lịch\n\nDạ hủy trước 1 tiếng ạ.\n")
+        with open(os.path.join(d, "nhom.md"), "w", encoding="utf-8") as f:
+            f.write("## Đặt tối đa mấy người\n> đi đông người\n\nDạ tối đa 3 người ạ.\n")
+
+        chunks = retrieval.load_corpus(d)
+        check(len(chunks) == 2, f"phải nạp 2 mục từ 2 file, đang {len(chunks)}")
+        srcs = sorted(c.source for c in chunks)
+        check(srcs == ["huy-doi", "nhom"], f"source phải là tên file, đang {srcs}")
+        check(all(c.id.startswith(c.source) for c in chunks),
+              "id mang tên file -> đọc log là biết mở file nào")
+
+        r = retrieval.Retriever(chunks)
+        hits = r.search("đặt tối đa mấy người được ạ", top_k=1)
+        check(hits and "tối đa" in hits[0][0].title, "tra được qua nhiều file")
+
+
+def test_faq_single_file_ids_keep_stem():
+    """id = <tên file>-<số thứ tự>. Corpus một-file tên faq.md vẫn ra 'faq-1' y như trước
+    khi có bố cục thư mục — id là khoá của cache vector, đổi id là dựng lại index vô cớ."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "faq.md")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("## Hủy lịch\n\nDạ hủy trước 1 tiếng ạ.\n")
+        chunks = retrieval.load_corpus(path)
+    check(chunks[0].id == "faq-1", f"id phải là 'faq-1', đang {chunks[0].id!r}")
+
+
+def test_confident_strong_bypasses_bigram_gate():
+    """Chốt _confident là thứ đã giết nhánh vector lần trước: nó thuần từ vựng và phủ quyết
+    cuối. Ứng viên được cross-encoder chấm mạnh phải được MIỄN điều kiện bigram, nhưng VẪN
+    phải qua điều kiện độ phủ — nếu không thì câu lạc đề cũng lọt."""
+    chunks = retrieval.load_corpus(_FAQ_CORPUS)
+    r = retrieval.Retriever(chunks)
+    idx = next(i for i, c in enumerate(chunks) if "Sát giờ hẹn" in c.title)
+
+    # "lỡ hẹn" và "sát giờ hẹn" cùng chủ đề nhưng KHÔNG chung bigram nào -> đúng loại câu mà
+    # ngữ nghĩa cứu được còn từ vựng thì không.
+    q = "lỡ hẹn thì thế nào"
+    check(not r._confident(idx, q), "câu này bị chốt bigram chặn (bối cảnh của bug cũ)")
+    check(r._confident(idx, q, strong=True), "chấm mạnh -> phải được miễn điều kiện bigram")
+
+    for offtopic in ("bên mình có chỗ đỗ xe không", "thời tiết hôm nay thế nào"):
+        check(not r._confident(idx, offtopic, strong=True),
+              f"{offtopic!r}: chấm mạnh KHÔNG được miễn điều kiện độ phủ — lạc đề vẫn chặn")
+
+
+def test_hybrid_falls_back_to_bm25_without_deps():
+    """RAG_BACKEND=hybrid mà chưa cài chromadb/sentence-transformers -> lùi về BM25, KHÔNG
+    được sập. Đây là thứ giữ cho service chạy trên máy chưa cài 3GB thư viện."""
+    r = retrieval.build_retriever(_settings_faq(rag_backend="hybrid"))
+    check(not r.is_hybrid, "thiếu gói -> phải lùi về bm25")
+    check(len(r.chunks) > 0, "vẫn nạp được corpus")
+    hits = r.search("hủy lịch có mất phí không", top_k=1)
+    check(hits, "và vẫn tra cứu được như thường")
+
+
+def test_rrf_fuse_rewards_agreement():
+    """RRF chỉ nhìn THỨ HẠNG nên không phải chuẩn hóa giữa thang BM25 (không chặn trên) và
+    thang cosine (0..1). Mục được CẢ HAI nhánh xếp cao phải thắng."""
+    fused = retrieval.rrf_fuse([[7, 1, 2], [7, 3, 4]])
+    check(fused[0][0] == 7, f"mục cả hai nhánh đồng thuận phải đứng đầu, đang {fused[:2]}")
 
 
 def test_faq_off_when_no_corpus():
